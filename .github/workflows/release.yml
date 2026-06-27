@@ -1,0 +1,47 @@
+name: release
+
+# Dispara ao publicar uma tag de versão (ex.: v0.2.0).
+# Builda o app, gera o instalador Windows e cria a Release no GitHub com o .exe.
+# O app cliente consulta essa Release para avisar o usuário de nova versão.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install deps (front)
+        run: pnpm install
+
+      - name: Install deps (sidecar)
+        run: pnpm --dir sidecar install
+
+      - name: Build + Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "isiGroup ${{ github.ref_name }}"
+          releaseBody: "Veja as mudanças desta versão abaixo."
+          releaseDraft: false
+          prerelease: false
