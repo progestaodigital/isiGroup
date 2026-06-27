@@ -327,7 +327,8 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
           </div>
         )}
         <span className="hint">
-          Selecione ao menos um grupo. Ações como "Excluir do grupo" só funcionam onde você é admin.
+          Selecione ao menos um grupo.
+          {isPro ? ' Ações como "Excluir do grupo" só funcionam onde você é admin.' : ""}
         </span>
       </div>
 
