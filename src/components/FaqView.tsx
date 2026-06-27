@@ -5,7 +5,8 @@ interface QA {
   a: React.ReactNode;
 }
 
-const FAQ: { group: string; items: QA[] }[] = [
+function buildFaq(isPro: boolean): { group: string; items: QA[] }[] {
+  return [
   {
     group: "Banimento e segurança da conta",
     items: [
@@ -78,12 +79,17 @@ const FAQ: { group: string; items: QA[] }[] = [
     items: [
       {
         q: "Posso agendar/automatizar em grupos onde não sou admin?",
-        a: (
+        a: isPro ? (
           <>
-            Sim. Você pode selecionar <b>qualquer grupo</b> que sua conta participa (os de membro aparecem
-            marcados como <i>(membro)</i>). Mas em grupos configurados como{" "}
+            Sim. Você pode selecionar <b>qualquer grupo</b> que a sua conta participa (os de membro
+            aparecem marcados como <i>(membro)</i>). Mas em grupos configurados como{" "}
             <b>"só administradores enviam"</b>, mensagens de membro <b>vão falhar</b> (aparece como
             "falhou" no status).
+          </>
+        ) : (
+          <>
+            Não. O isiGroup atua <b>apenas nos grupos onde a sua conta é administradora</b> — apenas esses
+            aparecem nas listas do agendador e das automações.
           </>
         ),
       },
@@ -161,17 +167,19 @@ const FAQ: { group: string; items: QA[] }[] = [
       },
     ],
   },
-];
+  ];
+}
 
-export function FaqView() {
+export function FaqView({ isPro }: { isPro: boolean }) {
   const [open, setOpen] = useState<string | null>("Tem risco de banimento?");
+  const faq = buildFaq(isPro);
 
   return (
     <div>
       <h1>Perguntas Frequentes</h1>
       <p className="muted">Dúvidas comuns sobre uso, limites e segurança da conta.</p>
 
-      {FAQ.map((section) => (
+      {faq.map((section) => (
         <div key={section.group}>
           <h2 className="section-title">{section.group}</h2>
           <div className="list">

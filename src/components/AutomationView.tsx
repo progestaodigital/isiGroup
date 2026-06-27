@@ -317,27 +317,17 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
           <p className="muted small">Sincronize grupos primeiro.</p>
         ) : (
           <div className="picker">
-            {targets.map((t) => {
-              const locked = !t.is_admin && !isPro;
-              return (
-                <label key={t.id} className={`pick ${locked ? "locked" : ""}`}>
-                  <input type="checkbox" disabled={locked} checked={scope.has(t.jid)} onChange={() => toggleScope(t.jid)} />
-                  <span>
-                    {t.name}
-                    {!t.is_admin && (
-                      <span className="muted small"> {locked ? "🔒 Pro" : "(membro)"}</span>
-                    )}
-                  </span>
-                </label>
-              );
-            })}
+            {(isPro ? targets : targets.filter((t) => t.is_admin)).map((t) => (
+              <label key={t.id} className="pick">
+                <input type="checkbox" checked={scope.has(t.jid)} onChange={() => toggleScope(t.jid)} />
+                <span>{t.name}{isPro && !t.is_admin && <span className="muted small"> (membro)</span>}</span>
+              </label>
+            ))}
           </div>
         )}
         <span className="hint">
-          Nenhum selecionado = vale para todos os grupos {isPro ? "" : "admin"}.{" "}
-          {isPro
-            ? 'Ações como "Excluir do grupo" só funcionam onde você é admin.'
-            : "Automatizar em grupos onde você não é admin (🔒 Pro) é um recurso do isiGroup Pro."}
+          Nenhum selecionado = vale para todos os grupos.{" "}
+          Ações como "Excluir do grupo" só funcionam onde você é admin.
         </span>
       </div>
 

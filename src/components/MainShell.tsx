@@ -39,9 +39,7 @@ export function MainShell({ license, onLicenseChange }: Props) {
   return (
     <div className="screen app">
       <aside className="sidebar">
-        <div className="brand-mark small">
-          isigroup{isPro && <span className="pro-badge">PRO</span>}
-        </div>
+        <div className="brand-mark small">isigroup</div>
         <nav>
           <button
             className={`nav-item ${view === "overview" ? "active" : ""}`}
@@ -102,7 +100,7 @@ export function MainShell({ license, onLicenseChange }: Props) {
         {view === "targets" && <TargetsView />}
         {view === "scheduler" && <SchedulerView isPro={isPro} />}
         {view === "automation" && <AutomationView isPro={isPro} />}
-        {view === "faq" && <FaqView />}
+        {view === "faq" && <FaqView isPro={isPro} />}
       </main>
     </div>
   );
@@ -152,7 +150,7 @@ function Overview({
           <h2>Licença</h2>
           <ul className="kv">
             <li><span>Estado</span><b className="ok">● válida</b></li>
-            <li><span>Edição</span><b>{license.edition === "pro" ? "isiGroup Pro" : "isiGroup"}</b></li>
+            <li><span>Produto</span><b>isiGroup</b></li>
             {license.expires_at && (
               <li><span>Expira</span><b>{license.expires_at}</b></li>
             )}

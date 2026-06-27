@@ -189,6 +189,8 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
   const [err, setErr] = useState<string | null>(null);
 
   const selectedTargets = useMemo(() => targets.filter((t) => selected.has(t.id)), [targets, selected]);
+  // Na edição padrão, grupos onde a conta não é admin não são exibidos.
+  const visibleTargets = useMemo(() => (isPro ? targets : targets.filter((t) => t.is_admin)), [targets, isPro]);
   const uploadingAny = steps.some((s) => s.uploading);
 
   function toggle(id: number) {
@@ -310,30 +312,20 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
       {/* GRUPOS */}
       <div className="field">
         <span>Grupos ({selected.size} selecionado{selected.size === 1 ? "" : "s"})</span>
-        {targets.length === 0 ? (
-          <p className="muted small">Nenhum grupo sincronizado. Sincronize em "Grupos & Comunidades".</p>
+        {visibleTargets.length === 0 ? (
+          <p className="muted small">Nenhum grupo disponível. Sincronize em "Grupos & Comunidades".</p>
         ) : (
           <div className="picker">
-            {targets.map((t) => {
-              const locked = !t.is_admin && !isPro;
-              return (
-                <label key={t.id} className={`pick ${locked ? "locked" : ""}`}>
-                  <input type="checkbox" disabled={locked} checked={selected.has(t.id)} onChange={() => toggle(t.id)} />
-                  <span>
-                    {t.name}
-                    {!t.is_admin && (
-                      <span className="muted small"> {locked ? "🔒 Pro" : "(membro)"}</span>
-                    )}
-                  </span>
-                </label>
-              );
-            })}
+            {visibleTargets.map((t) => (
+              <label key={t.id} className="pick">
+                <input type="checkbox" checked={selected.has(t.id)} onChange={() => toggle(t.id)} />
+                <span>{t.name}{isPro && !t.is_admin && <span className="muted small"> (membro)</span>}</span>
+              </label>
+            ))}
           </div>
         )}
-        {isPro ? (
-          <span className="hint">Você pode agendar em qualquer grupo. Em grupos onde só admins enviam, mensagens de membro podem falhar.</span>
-        ) : (
-          <span className="hint">Grupos onde você não é admin (🔒 Pro) ficam disponíveis no <b>isiGroup Pro</b>.</span>
+        {isPro && (
+          <span className="hint">Em grupos onde só admins enviam, mensagens de membro podem falhar.</span>
         )}
       </div>
 
