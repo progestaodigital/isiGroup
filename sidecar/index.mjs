@@ -459,6 +459,7 @@ function validateRuleBody(body) {
     const validMatch = ['starts_with', 'contains', 'ends_with', 'exact'].includes(match_type);
     if (!validMatch || !String(pattern ?? '').trim()) return { error: 'tipo de match e padrao sao obrigatorios' };
   }
+  if (!Array.isArray(scope) || scope.length === 0) return { error: 'selecione ao menos um grupo' };
   if (!Array.isArray(actions) || actions.length === 0) return { error: 'defina ao menos uma acao' };
 
   const prepared = [];

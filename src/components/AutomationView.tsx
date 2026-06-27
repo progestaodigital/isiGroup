@@ -219,6 +219,7 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
     setErr(null);
     if (!name.trim()) return setErr("Dê um nome à automação.");
     if (trigger === "message" && !pattern.trim()) return setErr("Defina o texto do gatilho.");
+    if (scope.size === 0) return setErr("Selecione ao menos um grupo.");
     if (actions.length === 0) return setErr("Adicione ao menos uma ação.");
 
     const apiActions: NewRuleAction[] = [];
@@ -312,7 +313,7 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
       )}
 
       <div className="field">
-        <span>Em quais grupos ({scope.size === 0 ? "todos" : scope.size})</span>
+        <span>Em quais grupos ({scope.size} selecionado{scope.size === 1 ? "" : "s"})</span>
         {targets.length === 0 ? (
           <p className="muted small">Sincronize grupos primeiro.</p>
         ) : (
@@ -326,8 +327,7 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
           </div>
         )}
         <span className="hint">
-          Nenhum selecionado = vale para todos os grupos.{" "}
-          Ações como "Excluir do grupo" só funcionam onde você é admin.
+          Selecione ao menos um grupo. Ações como "Excluir do grupo" só funcionam onde você é admin.
         </span>
       </div>
 
