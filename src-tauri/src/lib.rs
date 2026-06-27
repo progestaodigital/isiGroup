@@ -115,12 +115,13 @@ pub fn run() {
             // 3) Token de sessao para a API local.
             let token = gen_token();
 
-            // 4) Caminho do sidecar (dev: arvore do projeto; release: TODO Fase 6).
-            let script = resolve_sidecar_path();
-            eprintln!("[core] sidecar script: {}", script.display());
+            // 4) Node + script do sidecar (dev: PATH + arvore; release: embarcado).
+            let (node_cmd, script) = resolve_sidecar(app)?;
+            eprintln!("[core] node: {node_cmd} | sidecar: {}", script.display());
 
             // 5) Sobe o sidecar.
             let handle = sidecar::spawn_sidecar(
+                &node_cmd,
                 &script.to_string_lossy(),
                 &db_path.to_string_lossy(),
                 &token,
@@ -176,18 +177,24 @@ fn gen_token() -> String {
     hex::encode(bytes)
 }
 
-fn resolve_sidecar_path() -> std::path::PathBuf {
+/// Resolve o executavel Node e o script do sidecar.
+/// - Dev: usa o `node` do PATH e o `sidecar/index.mjs` da arvore do projeto.
+/// - Release: usa o Node embarcado e o sidecar copiados como recursos do app.
+fn resolve_sidecar(app: &tauri::App) -> Result<(String, std::path::PathBuf), String> {
     if cfg!(debug_assertions) {
-        // Dev: <projeto>/sidecar/index.mjs (src-tauri/.. = raiz do projeto).
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("sidecar")
-            .join("index.mjs")
+            .join("index.mjs");
+        Ok(("node".to_string(), script))
     } else {
-        // Release: ao lado do executavel. Empacotamento definitivo na Fase 6.
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("sidecar").join("index.mjs")))
-            .unwrap_or_default()
+        let res = app
+            .path()
+            .resource_dir()
+            .map_err(|e| format!("sem resource_dir: {e}"))?;
+        let node_name = if cfg!(windows) { "node.exe" } else { "node" };
+        let node = res.join("resources").join(node_name);
+        let script = res.join("resources").join("sidecar").join("index.mjs");
+        Ok((node.to_string_lossy().to_string(), script))
     }
 }

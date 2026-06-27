@@ -1,0 +1,1 @@
+Placeholder. Conteúdo real gerado por scripts/prepare-sidecar.mjs.

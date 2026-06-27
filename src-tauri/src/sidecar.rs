@@ -17,13 +17,15 @@ pub struct SidecarHandle {
 }
 
 /// Sobe o sidecar Node passando token de sessao e caminho do banco por env.
+/// `node_cmd` e o executavel Node (no PATH em dev, embarcado em release).
 /// Espera o sidecar reportar a porta efemera via marcador no stdout.
 pub fn spawn_sidecar(
+    node_cmd: &str,
     script_path: &str,
     db_path: &str,
     token: &str,
 ) -> Result<SidecarHandle, String> {
-    let mut child = Command::new("node")
+    let mut child = Command::new(node_cmd)
         .arg(script_path)
         .env("ISI_SIDECAR_TOKEN", token)
         .env("ISI_DB_PATH", db_path)

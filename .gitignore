@@ -26,6 +26,9 @@ dist-ssr
 # Rust / Tauri build
 src-tauri/target/
 src-tauri/gen/schemas/
+# Recursos empacotados (node + sidecar) — gerados pelo staging; mantemos só o placeholder
+src-tauri/resources/*
+!src-tauri/resources/keep.txt
 
 # Banco e sessao local (dados do usuario)
 *.db

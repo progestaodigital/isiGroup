@@ -8,7 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "sidecar:install": "pnpm --dir sidecar install"
+    "sidecar:install": "pnpm --dir sidecar install",
+    "prepare:bundle": "node scripts/prepare-sidecar.mjs"
   },
   "dependencies": {
     "react": "^19.1.0",
