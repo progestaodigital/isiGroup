@@ -127,6 +127,7 @@ export function AutomationView({ isPro }: { isPro: boolean }) {
                 </div>
               </div>
               <div className="tags">
+                {l.chip_label && <span className="tag mini">{l.chip_label}</span>}
                 <span className="tag mini">{l.actions_taken || "—"}</span>
                 <span className="muted small">{new Date(l.created_at).toLocaleString("pt-BR")}</span>
               </div>

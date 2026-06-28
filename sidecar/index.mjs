@@ -694,8 +694,11 @@ function deleteRule(res, id) {
 function listAutoLogs() {
   return db
     .prepare(
-      `SELECT l.id, l.target_jid, l.sender_e164, l.matched_text, l.actions_taken, l.created_at, r.name AS rule_name
-         FROM automation_logs l LEFT JOIN automation_rules r ON r.id = l.rule_id
+      `SELECT l.id, l.target_jid, l.sender_e164, l.matched_text, l.actions_taken, l.created_at,
+              r.name AS rule_name, a.label AS chip_label
+         FROM automation_logs l
+         LEFT JOIN automation_rules r ON r.id = l.rule_id
+         LEFT JOIN accounts a ON a.id = l.account_id
         ORDER BY l.id DESC LIMIT 100`
     )
     .all();

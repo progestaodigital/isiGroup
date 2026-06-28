@@ -22,7 +22,7 @@ export function createAutomation(db, wa, editionState) {
   }
 
   // Monta o corpo do webhook com os dados do lead/grupo/automacao.
-  function buildPayload(triggerType, rule, ctx) {
+  function buildPayload(triggerType, rule, ctx, actingAccountId) {
     const now = new Date();
     const event =
       triggerType === 'join'
@@ -30,9 +30,12 @@ export function createAutomation(db, wa, editionState) {
         : triggerType === 'leave'
           ? 'group.member_left'
           : 'automation.match';
+    const chipId = actingAccountId ?? ctx.account_id ?? null;
+    const chipRow = chipId ? db.prepare('SELECT label FROM accounts WHERE id = ?').get(chipId) : null;
     return {
       event,
       automation: rule.name, // nome da automacao
+      chip: { account_id: chipId, label: chipRow?.label ?? null }, // chip que detectou/reagiu
       group: { jid: ctx.jid, name: groupName(ctx.jid) }, // nome do grupo
       lead: {
         name: ctx.name ?? null, // nome usado no whatsapp (pushName/contato)
@@ -46,17 +49,44 @@ export function createAutomation(db, wa, editionState) {
     };
   }
 
+  // Dedup multi-chip: o mesmo evento chega por cada sessao (chip) membro do grupo.
+  // Processa so a 1a ocorrencia de cada (evento) numa janela curta.
+  const seen = new Map(); // key -> timestamp
+  function dedupe(key) {
+    const now = Date.now();
+    for (const [k, t] of seen) if (now - t > 90_000) seen.delete(k);
+    if (seen.has(key)) return false;
+    seen.set(key, now);
+    return true;
+  }
+
+  // Chip que responde: menor account_id CONECTADO que seja membro do grupo.
+  // null = conta primaria (caminho single-chip).
+  function responderFor(jid) {
+    const rows = db.prepare('SELECT DISTINCT account_id FROM targets WHERE jid = ? ORDER BY account_id').all(jid);
+    for (const r of rows) if (r.account_id && wa.isAccountConnected(r.account_id)) return r.account_id;
+    return null;
+  }
+  // Para 'remove': menor chip conectado que seja ADMIN do grupo.
+  function adminResponderFor(jid) {
+    const rows = db.prepare('SELECT account_id FROM targets WHERE jid = ? AND is_admin = 1 ORDER BY account_id').all(jid);
+    for (const r of rows) if (r.account_id && wa.isAccountConnected(r.account_id)) return r.account_id;
+    return null;
+  }
+
   // Mensagem recebida em grupo -> gatilhos 'message' e 'message_link'.
-  // info: { jid, sender, phone, name, text, raw }
+  // info: { jid, sender, phone, name, text, raw, account_id, msg_id }
   async function onMessage(info) {
     if (!info?.text) return;
+    if (!dedupe(`m:${info.jid}:${info.msg_id}`)) return; // multi-chip: 1x por mensagem
     await runTrigger('message', info);
     await runTrigger('message_link', info);
   }
 
   // Entrada/saida de membro -> gatilho 'join' | 'leave'.
-  // info: { jid, sender, phone, name }
+  // info: { jid, sender, phone, name, account_id }
   async function onMembership(eventType, info) {
+    if (!dedupe(`${eventType}:${info.jid}:${info.sender}`)) return; // 1x por evento
     await runTrigger(eventType, info);
   }
 
@@ -83,20 +113,22 @@ export function createAutomation(db, wa, editionState) {
       .all(rule.id);
 
     const taken = [];
+    // Chip que responde (multi-chip): membro conectado de menor id; null = primaria.
+    const responder = responderFor(ctx.jid);
     for (let ai = 0; ai < actions.length; ai++) {
       const action = actions[ai];
       const cfg = safeParse(action.config_json);
       switch (action.action_type) {
         case 'group_message': {
           // Sequencia rica (texto/imagem/audio/video/enquete) no grupo.
-          const sent = await runMessageAction(ctx.jid, cfg);
+          const sent = await runMessageAction(responder, ctx.jid, cfg);
           if (sent) taken.push('group_message');
           break;
         }
         case 'dm': {
           if (ctx.sender) {
             try {
-              const sent = await runMessageAction(ctx.sender, cfg); // DM ao membro (@lid — questao #6)
+              const sent = await runMessageAction(responder, ctx.sender, cfg); // DM ao membro (@lid — questao #6)
               if (sent) taken.push('dm');
             } catch (e) {
               taken.push('dm_failed');
@@ -110,19 +142,25 @@ export function createAutomation(db, wa, editionState) {
             taken.push('remove_no_sender');
             break;
           }
+          // Remove exige um chip ADMIN daquele grupo (questao #6: por chip).
+          const adminResp = adminResponderFor(ctx.jid);
+          if (!adminResp) {
+            taken.push('remove_no_admin_chip');
+            break;
+          }
           // TRAVA DE ADMIN: nunca remove admin por gatilho.
-          const isAdmin = await wa.isParticipantAdmin(ctx.jid, ctx.sender).catch(() => false);
+          const isAdmin = await wa.accountIsParticipantAdmin(adminResp, ctx.jid, ctx.sender).catch(() => false);
           if (isAdmin) {
             taken.push('remove_skipped_admin');
           } else {
-            await wa.removeParticipant(ctx.jid, ctx.sender);
+            await wa.accountRemoveParticipant(adminResp, ctx.jid, ctx.sender);
             taken.push('remove');
           }
           break;
         }
         case 'webhook': {
           if (cfg.url) {
-            await postWebhook(cfg.url, cfg.secret, buildPayload(triggerType, rule, ctx));
+            await postWebhook(cfg.url, cfg.secret, buildPayload(triggerType, rule, ctx, responder));
             taken.push('webhook');
           }
           break;
@@ -140,10 +178,11 @@ export function createAutomation(db, wa, editionState) {
     }
 
     db.prepare(
-      `INSERT INTO automation_logs (rule_id, target_jid, sender_e164, matched_text, actions_taken, created_at)
-       VALUES (?,?,?,?,?,?)`
+      `INSERT INTO automation_logs (rule_id, account_id, target_jid, sender_e164, matched_text, actions_taken, created_at)
+       VALUES (?,?,?,?,?,?,?)`
     ).run(
       rule.id,
+      responder ?? ctx.account_id ?? null,
       ctx.jid,
       ctx.phone ?? (ctx.name ? ctx.name : null),
       (ctx.text ?? `[${triggerType}] ${ctx.name ?? ''}`).slice(0, 500),
@@ -154,9 +193,11 @@ export function createAutomation(db, wa, editionState) {
   }
 
   // Executa uma acao de mensagem (sequencia rica) num jid (grupo ou privado).
-  async function runMessageAction(jid, cfg) {
+  // accountId = chip que envia (null = conta primaria, caminho single-chip).
+  async function runMessageAction(accountId, jid, cfg) {
     const steps = actionSteps(cfg);
     if (steps.length === 0) return false;
+    const send = (j, content) => (accountId ? wa.accountSend(accountId, j, content) : wa.sendContent(j, content));
     const minMs = (cfg.step_min_s ?? 0) * 1000;
     const maxMs = Math.max(minMs, (cfg.step_max_s ?? cfg.step_min_s ?? 0) * 1000);
     const cache = new Map();
@@ -176,7 +217,7 @@ export function createAutomation(db, wa, editionState) {
         }
         buf = cache.get(path);
       }
-      await wa.sendContent(jid, contentFromStep(step, buf)); // @all/link tratados em sendContent
+      await send(jid, contentFromStep(step, buf)); // @all/link tratados em sendContent
       if (i < steps.length - 1) {
         const wait = minMs + Math.floor(Math.random() * Math.max(1, maxMs - minMs + 1));
         await sleep(wait);

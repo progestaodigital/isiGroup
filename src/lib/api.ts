@@ -372,6 +372,7 @@ export interface NewRule {
 export interface AutoLog {
   id: number;
   rule_name: string | null;
+  chip_label?: string | null;
   target_jid: string;
   sender_e164: string | null;
   matched_text: string;

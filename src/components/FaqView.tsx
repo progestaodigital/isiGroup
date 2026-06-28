@@ -165,6 +165,22 @@ function buildFaq(isPro: boolean): { group: string; items: QA[] }[] {
           </>
         ),
       },
+      ...(isPro
+        ? [
+            {
+              q: "Como funcionam vários chips (multi-chip)?",
+              a: (
+                <>
+                  Você seleciona os <b>grupos</b> primeiro; o app mostra quais <b>chips</b> são membros de cada
+                  um (<i>cobre X de Y</i>). No disparo, cada grupo é enviado por <b>um</b> chip que já é membro
+                  dele, com <b>rodízio</b> entre os chips para distribuir a carga. Grupos sem nenhum chip
+                  selecionado que os cubra são <b>pulados</b> (e avisados). O app <b>nunca</b> faz um chip entrar
+                  em grupo — trabalha só com o que cada chip já participa.
+                </>
+              ),
+            },
+          ]
+        : []),
     ],
   },
   ];
