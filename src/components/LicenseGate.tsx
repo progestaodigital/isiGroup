@@ -87,6 +87,7 @@ export function LicenseGate({ license, onChange }: Props) {
   return (
     <div className="screen center">
       <div className="card gate">
+        <img src="/logo.png" className="brand-logo" alt="isigroup" />
         <div className="brand-mark">isigroup</div>
         <h1>{copy.title}</h1>
         <p className="muted">{copy.body}</p>

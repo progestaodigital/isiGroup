@@ -31,8 +31,9 @@ export default function App() {
   if (loading || !license || license.status === "loading") {
     return (
       <div className="screen center">
+        <img src="/logo.png" className="brand-logo float-anim" alt="isigroup" />
         <div className="brand-mark">isigroup</div>
-        <p className="muted">Iniciando…</p>
+        <p className="mono">● Iniciando sistema</p>
       </div>
     );
   }
