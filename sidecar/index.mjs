@@ -5,12 +5,18 @@
 
 import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
-import { rmSync, existsSync } from 'node:fs';
+import { rmSync, existsSync, readFileSync } from 'node:fs';
 import { openDatabase } from './src/db.mjs';
 import { createWhatsApp } from './src/whatsapp.mjs';
 import { createScheduler } from './src/scheduler.mjs';
 import { saveUpload } from './src/media.mjs';
 import { createAutomation } from './src/automation.mjs';
+
+// Nome/versão vêm do package.json (copiado ao lado deste módulo no bundle),
+// para o /health nunca defasar em relação à versão real publicada.
+const PKG = JSON.parse(
+  readFileSync(new URL('./package.json', import.meta.url), 'utf8'),
+);
 
 const TOKEN = process.env.ISI_SIDECAR_TOKEN;
 const DB_PATH = process.env.ISI_DB_PATH || './isigroup.db';
@@ -115,8 +121,8 @@ async function route(req, res, url) {
     const migrations = db.prepare('SELECT COUNT(*) AS n FROM _migrations').get().n;
     return json(res, 200, {
       ok: true,
-      service: 'isigroup-sidecar',
-      version: '0.1.0',
+      service: PKG.name,
+      version: PKG.version,
       migrations_applied: migrations,
       uptime_s: Math.round(process.uptime()),
     });
