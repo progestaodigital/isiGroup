@@ -307,7 +307,11 @@ Instalador gerado, app atualiza sozinho, opera de forma estável com pacing corr
 
 ---
 
-### Fase A — Pool de sessões (fundação)
+### Fase A — Pool de sessões (fundação) — ✅ CONCLUÍDA (2026-06-28)
+
+> `whatsapp.mjs` virou pool (`Map<accountId, session>`), auth em `wa-session/<id>/`,
+> migração da sessão legada -> `/1/`, API single-chip preservada (delega à conta
+> primária), `bootReconnect` religa todas. Verificado: 1 chip idêntico ao anterior.
 
 **Objetivo:** transformar o runtime single-session em pool, sem mudar comportamento com 1 chip.
 
@@ -321,7 +325,11 @@ Instalador gerado, app atualiza sozinho, opera de forma estável com pacing corr
 
 ---
 
-### Fase B — Gestão de chips + proxy (Pro)
+### Fase B — Gestão de chips + proxy (Pro) — ✅ CONCLUÍDA (2026-06-28)
+
+> Endpoints `/accounts` (CRUD + connect/logout/sync/proxy/status); gating no sidecar
+> (free=1, 2º chip -> 403); proxy por chip (socks5/http). Tela `ConnectionsView`
+> multi-chip (QR/status/proxy/remover por chip). Verificado por smoke test.
 
 **Objetivo:** UI para conectar/gerenciar vários chips, cada um com proxy opcional.
 
@@ -335,7 +343,11 @@ Instalador gerado, app atualiza sozinho, opera de forma estável com pacing corr
 
 ---
 
-### Fase C — Sync por conta + matriz de cobertura
+### Fase C — Sync por conta + matriz de cobertura — ✅ CONCLUÍDA (2026-06-28)
+
+> `syncTargets` por sessão (popula `targets` por `account_id`); endpoint `/coverage`
+> devolve, por chip, quais grupos cobre + os grupos descobertos. Sync por chip na UI.
+> Verificado: chip1={gA,gB}, chip2={gB,gC}, descoberto={gD}.
 
 **Objetivo:** saber, de forma confiável, quais chips são membros de quais grupos.
 
