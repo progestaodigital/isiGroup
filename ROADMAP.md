@@ -281,7 +281,7 @@ Instalador gerado, app atualiza sozinho, opera de forma estável com pacing corr
 
 ## Milestone 2 — Multi-chip (plano Pro)
 
-> **Versão do milestone:** 2.0 · Data base: 2026-06-27 · Status: 📋 planejado (não iniciado)
+> **Versão do milestone:** 2.0 · Data base: 2026-06-27 · Status: ✅ **código completo (A–F) em 2026-06-28** — validação ao vivo com 2+ chips reais pendente
 >
 > **Objetivo do milestone:** permitir que o usuário Pro conecte **vários chips de WhatsApp** (cada um com proxy opcional) e, nos disparos e automações, escolha **quais chips usar** sobre um conjunto de grupos. O modelo é **group-first + cobertura**: o usuário seleciona os grupos primeiro, e o sistema mostra/garante quais chips cobrem esses grupos (um chip não precisa estar em todos os grupos; cada grupo precisa de ≥1 chip membro). A rotação de envio é **round-robin por grupo** entre os chips que já são membros — nunca fazendo chip entrar em grupo (decisão consciente: elimina o risco de ban por entrada/adição em massa e a dependência de link de convite).
 
@@ -359,7 +359,12 @@ Instalador gerado, app atualiza sozinho, opera de forma estável com pacing corr
 
 ---
 
-### Fase D — Disparo group-first + cobertura + rotação
+### Fase D — Disparo group-first + cobertura + rotação — ✅ CONCLUÍDA (2026-06-28)
+
+> Migration 008 (`schedule_targets.account_id`); `scheduler.mjs` roteia por chip
+> (round-robin por grupo resolvido no submit), grupos sem cobertura = `skipped_no_coverage`;
+> `SchedulerView` group-first (grupos distintos → seletor de chips → prévia de descobertos).
+> 1 chip = idêntico ao anterior. Verificado: roteamento grupo→chip gravado certo.
 
 **Objetivo:** redesenhar o disparo para o modelo group-first com rotação por grupo.
 
@@ -372,7 +377,11 @@ Instalador gerado, app atualiza sozinho, opera de forma estável com pacing corr
 
 ---
 
-### Fase E — Automações multi-chip
+### Fase E — Automações multi-chip — ✅ CONCLUÍDA (2026-06-28)
+
+> Dedup de eventos por (grupo, msg-id / evento) entre as sessões → dispara 1x.
+> Chip que responde = menor chip conectado membro do grupo; `remove` usa o menor
+> chip admin (questão #6 por chip). Verificado: boot + sintaxe.
 
 **Objetivo:** automação reativa funcionando com vários chips, sem duplicar ações.
 
@@ -385,7 +394,11 @@ Instalador gerado, app atualiza sozinho, opera de forma estável com pacing corr
 
 ---
 
-### Fase F — Gating, propagação de accountId e polish
+### Fase F — Gating, propagação de accountId e polish — ✅ CONCLUÍDA (2026-06-28)
+
+> Gating no sidecar (free=1, 2º chip→403). Migration 009 (`automation_logs.account_id`);
+> webhook ganha bloco `chip{account_id,label}`; log + `/automation/logs` trazem o chip;
+> `AutomationView` mostra a tag do chip. FAQ (Pro) explica group-first/cobertura/rodízio.
 
 **Objetivo:** fechar o recurso como Pro de verdade e propagar a identidade do chip ponta a ponta.
 
