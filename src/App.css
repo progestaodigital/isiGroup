@@ -28,16 +28,46 @@ html, body, #root {
   font-family: "Space Grotesk", system-ui, sans-serif;
 }
 
-/* Fundo: grid 60px + glow lime/emerald + leve textura */
+/* Fundo: grid 60px com leve fade radial nas bordas */
 body {
   position: relative;
   background-color: #000;
   background-image:
-    radial-gradient(60rem 60rem at 85% -10%, rgba(204, 255, 0, 0.07), transparent 60%),
-    radial-gradient(50rem 50rem at -10% 110%, rgba(16, 185, 129, 0.07), transparent 60%),
-    linear-gradient(to right, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
-  background-size: 100% 100%, 100% 100%, 60px 60px, 60px 60px;
+    linear-gradient(to right, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+  background-size: 60px 60px, 60px 60px;
+}
+
+/* Esferas de brilho (glow-spheres) flutuantes — profundidade atrás de tudo */
+body::before {
+  content: "";
+  position: fixed;
+  inset: -25%;
+  z-index: -2;
+  pointer-events: none;
+  background:
+    radial-gradient(40rem 40rem at 82% 8%, rgba(204, 255, 0, 0.14), transparent 60%),
+    radial-gradient(36rem 36rem at 10% 92%, rgba(16, 185, 129, 0.14), transparent 60%),
+    radial-gradient(26rem 26rem at 55% 45%, rgba(204, 255, 0, 0.05), transparent 60%);
+  filter: blur(40px);
+  animation: drift 26s ease-in-out infinite alternate;
+}
+
+/* Textura de ruído (granulado) — tira o aspecto "chapado" do dark mode */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.045;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+@keyframes drift {
+  0% { transform: translate3d(0, 0, 0) scale(1); }
+  100% { transform: translate3d(-3%, 2.5%, 0) scale(1.1); }
 }
 
 h1, h2, h3 { letter-spacing: -0.04em; font-weight: 600; }
@@ -71,13 +101,16 @@ h1, h2, h3 { letter-spacing: -0.04em; font-weight: 600; }
 
 /* --- Cards (vidro) --- */
 .card {
+  position: relative;
   background: var(--bg-elev);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 20px;
-  transition: border-color 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  /* brilho de vidro no topo + leve sombra para descolar do fundo */
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 10px 34px rgba(0, 0, 0, 0.28);
+  transition: border-color 0.25s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.25s ease;
 }
 
 /* --- Gate de licenca --- */
@@ -196,12 +229,23 @@ button.link.danger { color: var(--danger); }
 .content { padding: 32px 36px; }
 .content h1 { margin: 0 0 4px; font-size: 30px; letter-spacing: -0.05em; }
 .section-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
   margin: 32px 0 12px;
   font-family: var(--mono);
   text-transform: uppercase;
   letter-spacing: 0.18em;
   font-size: 11px;
   color: var(--muted);
+}
+.section-title::before {
+  content: "";
+  width: 16px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
 }
 
 /* --- FAQ --- */
@@ -452,3 +496,51 @@ button.link.danger { color: var(--danger); }
   50% { transform: translateY(-10px); }
 }
 .float-anim { animation: float 6s infinite ease-in-out; }
+
+/* Paginação das listas */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 6px 0 2px;
+}
+.pager .mono { color: var(--muted); }
+
+/* --- Polimento visual (Obsidian & Lime) --- */
+
+/* Scrollbars discretas, com hover lime */
+* { scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.14) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: rgba(204, 255, 0, 0.35); background-clip: padding-box; }
+
+/* Seleção de texto em lime */
+::selection { background: rgba(204, 255, 0, 0.28); color: #fff; }
+
+/* Linhas de lista: brilho lime sutil ao passar o mouse */
+.row-item:hover { box-shadow: 0 0 0 1px rgba(204, 255, 0, 0.18), 0 0 26px rgba(204, 255, 0, 0.05); }
+
+/* Brilhos sutis na tipografia de marca/título */
+.brand-mark { text-shadow: 0 0 22px rgba(204, 255, 0, 0.22); }
+.content h1 { text-shadow: 0 0 30px rgba(204, 255, 0, 0.1); }
+
+/* Botão ativo na nav com um traço lime à esquerda */
+.nav-item.active {
+  background-image: linear-gradient(90deg, rgba(204, 255, 0, 0.12), transparent 40%);
+}
+
+/* Logo da tela "Iniciando" / licença com halo pulsante */
+.center .brand-logo {
+  animation: float 6s infinite ease-in-out, halo 3s ease-in-out infinite;
+}
+@keyframes halo {
+  0%, 100% { box-shadow: 0 0 45px rgba(204, 255, 0, 0.28); }
+  50% { box-shadow: 0 0 85px rgba(204, 255, 0, 0.5); }
+}

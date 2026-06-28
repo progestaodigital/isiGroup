@@ -16,6 +16,7 @@ import {
   updateRule,
 } from "../lib/api";
 import { StepDraft, StepSequenceEditor, draftFromStored, newStep, stepDraftToApi } from "./StepEditor";
+import { usePager, Pager } from "./Pager";
 import type { RuleAction } from "../lib/api";
 type RuleActionConfig = RuleAction["config"];
 
@@ -64,6 +65,9 @@ export function AutomationView({ isPro }: { isPro: boolean }) {
     return m;
   }, [targets]);
 
+  const rulesP = usePager(rules);
+  const logsP = usePager(logs);
+
   return (
     <div>
       <div className="head-row">
@@ -89,7 +93,7 @@ export function AutomationView({ isPro }: { isPro: boolean }) {
         <div className="card empty"><p className="muted">Nenhuma automação ainda.</p></div>
       ) : (
         <div className="list">
-          {rules.map((r) => (
+          {rulesP.slice.map((r) => (
             <div key={r.id} className="row-item">
               <div>
                 <b>{r.name}</b>
@@ -109,6 +113,7 @@ export function AutomationView({ isPro }: { isPro: boolean }) {
               </div>
             </div>
           ))}
+          <Pager page={rulesP.page} pageCount={rulesP.pageCount} setPage={rulesP.setPage} />
         </div>
       )}
 
@@ -117,7 +122,7 @@ export function AutomationView({ isPro }: { isPro: boolean }) {
         <div className="card empty"><p className="muted">Nenhum disparo registrado.</p></div>
       ) : (
         <div className="list">
-          {logs.slice(0, 30).map((l) => (
+          {logsP.slice.map((l) => (
             <div key={l.id} className="row-item">
               <div>
                 <b>{l.rule_name ?? "(regra removida)"}</b>
@@ -133,6 +138,7 @@ export function AutomationView({ isPro }: { isPro: boolean }) {
               </div>
             </div>
           ))}
+          <Pager page={logsP.page} pageCount={logsP.pageCount} setPage={logsP.setPage} />
         </div>
       )}
     </div>

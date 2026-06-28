@@ -16,6 +16,7 @@ import {
   rescheduleSchedule,
 } from "../lib/api";
 import { StepDraft, newStep, stepDraftToApi, StepSequenceEditor } from "./StepEditor";
+import { usePager, Pager } from "./Pager";
 
 const STATUS: Record<string, { label: string; cls: string }> = {
   pending: { label: "Pendente", cls: "warn" },
@@ -89,6 +90,7 @@ export function SchedulerView({ isPro }: { isPro: boolean }) {
 
 function ScheduleList({ rows, onChange, recurring }: { rows: ScheduleRow[]; onChange: () => void; recurring?: boolean }) {
   const [editing, setEditing] = useState<number | null>(null);
+  const { slice, page, pageCount, setPage } = usePager(rows);
   if (rows.length === 0) {
     return (
       <div className="card empty">
@@ -98,7 +100,7 @@ function ScheduleList({ rows, onChange, recurring }: { rows: ScheduleRow[]; onCh
   }
   return (
     <div className="list">
-      {rows.map((s) => {
+      {slice.map((s) => {
         const st = STATUS[s.status] ?? STATUS.pending;
         const canCancel = s.status === "pending" || s.status === "active";
         return (
@@ -131,6 +133,7 @@ function ScheduleList({ rows, onChange, recurring }: { rows: ScheduleRow[]; onCh
           </div>
         );
       })}
+      <Pager page={page} pageCount={pageCount} setPage={setPage} />
     </div>
   );
 }
