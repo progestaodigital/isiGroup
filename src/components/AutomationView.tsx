@@ -364,6 +364,7 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
               <>
                 <input type="text" value={a.url} onChange={(e) => { const v = e.currentTarget.value; patchAction(i, { url: v }); }} placeholder="https://seu-crm/webhook" />
                 <input type="text" value={a.secret} onChange={(e) => { const v = e.currentTarget.value; patchAction(i, { secret: v }); }} placeholder="Secret (HMAC, opcional)" />
+                <span className="hint">Envia <b>POST</b> em <b>application/json</b>. No n8n, configure o nó Webhook como <b>POST</b> e use a <b>Production URL</b> com o workflow ativo.</span>
               </>
             )}
 
