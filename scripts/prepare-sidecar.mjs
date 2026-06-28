@@ -3,7 +3,7 @@
 // (node_modules plano via npm) para src-tauri/resources, que o Tauri embute no
 // instalador. Assim o app instalado roda o sidecar sem Node na máquina do usuário.
 
-import { cpSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +31,15 @@ for (const f of ['index.mjs', 'package.json']) {
 for (const d of ['src', 'migrations']) {
   cpSync(join(sidecarSrc, d), join(sidecarDst, d), { recursive: true });
 }
+
+// 2b) Sincroniza a versão do sidecar com a do app (o /health reporta esta
+// versão na tela "Sidecar"). Assim o bundle nunca defasa da versão publicada.
+const appVersion = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
+const pkgPath = join(sidecarDst, 'package.json');
+const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+pkg.version = appVersion;
+writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+console.log('[bundle] versão do sidecar sincronizada:', appVersion);
 
 // 3) Dependências de produção em node_modules plano (npm, sem symlinks do pnpm).
 console.log('[bundle] instalando dependências de produção do sidecar...');
