@@ -48,12 +48,9 @@ const automation = createAutomation(db, wa, editionState);
 wa.setMessageHandler(automation.onMessage);
 wa.setMembershipHandler(automation.onMembership);
 
-// Reconexao automatica no arranque: se ja existe uma sessao salva (creds.json),
-// religa sozinho — sem precisar clicar em "Conectar" nem reescanear o QR.
-if (existsSync(join(sessionDir, 'creds.json'))) {
-  console.error('[wa] sessao salva encontrada — reconectando automaticamente');
-  wa.start();
-}
+// Reconexao automatica no arranque: religa todas as contas (chips) com sessao
+// salva — sem precisar clicar em "Conectar" nem reescanear o QR.
+wa.bootReconnect();
 
 // A webview do Tauri tem origem propria (tauri://localhost). Chamadas ao
 // loopback sao cross-origin: liberamos CORS (a protecao real e o token).
