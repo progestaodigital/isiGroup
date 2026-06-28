@@ -105,10 +105,13 @@ pub fn run() {
             eprintln!("[core] hwid {}", hwid::mask_hwid(&hwid));
 
             // 2) Diretorio de dados do app + caminho do banco.
-            let data_dir = app
-                .path()
-                .app_data_dir()
-                .map_err(|e| format!("sem app_data_dir: {e}"))?;
+            // strip_verbatim: em release esses caminhos vem com prefixo \\?\
+            // (verbatim), que quebra o Node. Removemos para usar C:\... normal.
+            let data_dir = strip_verbatim(
+                app.path()
+                    .app_data_dir()
+                    .map_err(|e| format!("sem app_data_dir: {e}"))?,
+            );
             std::fs::create_dir_all(&data_dir).ok();
             let db_path = data_dir.join("isigroup.db");
 
@@ -171,6 +174,17 @@ pub fn run() {
     });
 }
 
+/// Remove o prefixo verbatim `\\?\` dos caminhos do Windows (retornados
+/// canonicalizados por resource_dir/app_data_dir em release). O Node nao
+/// aceita esse prefixo ao carregar o script nem ao abrir o banco.
+fn strip_verbatim(p: std::path::PathBuf) -> std::path::PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) => std::path::PathBuf::from(rest),
+        None => p,
+    }
+}
+
 fn gen_token() -> String {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -188,10 +202,11 @@ fn resolve_sidecar(app: &tauri::App) -> Result<(String, std::path::PathBuf), Str
             .join("index.mjs");
         Ok(("node".to_string(), script))
     } else {
-        let res = app
-            .path()
-            .resource_dir()
-            .map_err(|e| format!("sem resource_dir: {e}"))?;
+        let res = strip_verbatim(
+            app.path()
+                .resource_dir()
+                .map_err(|e| format!("sem resource_dir: {e}"))?,
+        );
         let node_name = if cfg!(windows) { "node.exe" } else { "node" };
         let node = res.join("resources").join(node_name);
         let script = res.join("resources").join("sidecar").join("index.mjs");

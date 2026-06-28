@@ -244,7 +244,7 @@ Instalador gerado, app atualiza sozinho, opera de forma estável com pacing corr
 | # | Questão | Fase de resolução | Status |
 |---|---|---|---|
 | 1 | Estabilidade de post em `community_announce` na Baileys atual | Fase 1 | ⏳ validar (sem comunidades no teste atual; reavaliar quando houver) |
-| 2 | Empacotamento do sidecar (Node embarcado vs binário único) | Fase 0 (decisão) / Fase 6 (impl) | 🟡 parcial — `node:sqlite` removeu a dep nativa; falta embarcar o runtime Node na Fase 6 |
+| 2 | Empacotamento do sidecar (Node embarcado vs binário único) | Fase 6 | ✅ resolvido — node.exe + sidecar (node_modules) embarcados como recursos do Tauri; instalador NSIS gerado e sidecar embarcado validado |
 | 3 | Geração da waveform do áudio PTT (lib vs cálculo próprio) | Fase 3 | ✅ resolvido — `ffmpeg-static` transcodifica p/ opus/ogg + waveform real do PCM |
 | 4 | Limite real de membros de comunidade (2.000 vs 5.000) | Fase 1 (verificar) | ⏳ |
 | 5 | Plano de licença (proxy vs BYOK) — isigroup tende a só `validate` | Fase 0 | ✅ resolvido — **só `validate`**, sem rotas Bearer-gated |
