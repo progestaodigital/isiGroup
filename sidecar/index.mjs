@@ -185,6 +185,11 @@ async function route(req, res, url) {
       return json(res, 409, { error: 'not_connected', message: err.message });
     }
   }
+  if (match('POST', '/proxy/test')) {
+    const b = await readJson(req);
+    if (!b?.proxy_url) return json(res, 400, { error: 'bad_request', message: 'informe a url do proxy' });
+    return json(res, 200, await wa.testProxy(String(b.proxy_url)));
+  }
   const acctProxy = path.match(/^\/accounts\/(\d+)\/proxy$/);
   if (method === 'POST' && acctProxy) {
     const b = await readJson(req);
@@ -358,8 +363,14 @@ function createSchedule(res, body) {
     name, scheduled_at, content_mode, default_text, targets,
     kind: rawKind, recur_dow, recur_time,
     payload_type: rawType, media, poll,
-    messages, steps: rawSteps, step_min_s, step_max_s,
+    messages, steps: rawSteps, step_min_s, step_max_s, account_ids,
   } = body ?? {};
+
+  // Pool de chips selecionado (multi-chip) — o scheduler rotaciona por execucao.
+  const poolJson =
+    Array.isArray(account_ids) && account_ids.length
+      ? JSON.stringify(account_ids.map(Number).filter(Number.isInteger))
+      : null;
 
   if (!Array.isArray(targets) || targets.length === 0) {
     return json(res, 400, { error: 'bad_request', message: 'selecione ao menos um alvo' });
@@ -463,8 +474,8 @@ function createSchedule(res, body) {
       .prepare(
         `INSERT INTO schedules
            (account_id, name, scheduled_at, payload_type, content_mode, default_json, status, created_at,
-            kind, recur_dow, recur_time, last_run_at, step_min_s, step_max_s)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+            kind, recur_dow, recur_time, last_run_at, step_min_s, step_max_s, account_ids_json)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       )
       .run(
         account?.id ?? null,
@@ -480,7 +491,8 @@ function createSchedule(res, body) {
         kind === 'recurring' ? recur_time : null,
         initialLastRun,
         stepMin,
-        stepMax
+        stepMax,
+        poolJson
       );
     scheduleId = r.lastInsertRowid;
 
@@ -556,7 +568,9 @@ function listRules() {
   return rules.map((r) => ({
     ...r,
     scope_json: undefined,
+    account_ids_json: undefined,
     scope: safeArr(r.scope_json),
+    account_ids: safeArr(r.account_ids_json),
     actions: db
       .prepare('SELECT action_type, config_json, order_index FROM automation_actions WHERE rule_id = ? ORDER BY order_index')
       .all(r.id)
@@ -566,7 +580,11 @@ function listRules() {
 
 // Valida o corpo de uma regra (create/update). Retorna { error } ou os campos prontos.
 function validateRuleBody(body) {
-  const { name, trigger_type: rawTrigger, match_type, pattern, case_sensitive, scope, actions } = body ?? {};
+  const { name, trigger_type: rawTrigger, match_type, pattern, case_sensitive, scope, actions, account_ids } = body ?? {};
+  const accountIdsJson =
+    Array.isArray(account_ids) && account_ids.length
+      ? JSON.stringify(account_ids.map(Number).filter(Number.isInteger))
+      : null;
   const trigger = ['message', 'message_link', 'join', 'leave'].includes(rawTrigger) ? rawTrigger : 'message';
 
   if (!String(name ?? '').trim()) return { error: 'nome obrigatorio' };
@@ -621,6 +639,7 @@ function validateRuleBody(body) {
     pattern: trigger === 'message' ? String(pattern) : null,
     case_sensitive: case_sensitive ? 1 : 0,
     scope: JSON.stringify(Array.isArray(scope) ? scope : []),
+    account_ids_json: accountIdsJson,
     prepared,
   };
 }
@@ -642,10 +661,10 @@ function createRule(res, body) {
   try {
     const r = db
       .prepare(
-        `INSERT INTO automation_rules (account_id, name, enabled, trigger_type, match_type, pattern, case_sensitive, scope_json)
-         VALUES (?,?,?,?,?,?,?,?)`
+        `INSERT INTO automation_rules (account_id, name, enabled, trigger_type, match_type, pattern, case_sensitive, scope_json, account_ids_json)
+         VALUES (?,?,?,?,?,?,?,?,?)`
       )
-      .run(account?.id ?? null, String(body.name).trim(), 1, v.trigger, v.match_type, v.pattern, v.case_sensitive, v.scope);
+      .run(account?.id ?? null, String(body.name).trim(), 1, v.trigger, v.match_type, v.pattern, v.case_sensitive, v.scope, v.account_ids_json);
     ruleId = r.lastInsertRowid;
     insertActions(ruleId, v.prepared);
     db.exec('COMMIT;');
@@ -665,8 +684,8 @@ function updateRule(res, id, body) {
   db.exec('BEGIN;');
   try {
     db.prepare(
-      `UPDATE automation_rules SET name=?, trigger_type=?, match_type=?, pattern=?, case_sensitive=?, scope_json=? WHERE id=?`
-    ).run(String(body.name).trim(), v.trigger, v.match_type, v.pattern, v.case_sensitive, v.scope, id);
+      `UPDATE automation_rules SET name=?, trigger_type=?, match_type=?, pattern=?, case_sensitive=?, scope_json=?, account_ids_json=? WHERE id=?`
+    ).run(String(body.name).trim(), v.trigger, v.match_type, v.pattern, v.case_sensitive, v.scope, v.account_ids_json, id);
     db.prepare('DELETE FROM automation_actions WHERE rule_id = ?').run(id);
     insertActions(id, v.prepared);
     db.exec('COMMIT;');
@@ -770,9 +789,12 @@ function listSchedules() {
               s.kind, s.recur_dow, s.recur_time, s.last_run_at,
               COUNT(st.id) AS total,
               SUM(st.status = 'sent')   AS sent,
-              SUM(st.status = 'failed') AS failed
+              SUM(st.status = 'failed') AS failed,
+              SUM(st.status = 'skipped_no_coverage') AS skipped,
+              GROUP_CONCAT(DISTINCT a.label) AS chips
          FROM schedules s
          LEFT JOIN schedule_targets st ON st.schedule_id = s.id
+         LEFT JOIN accounts a ON a.id = st.account_id
         GROUP BY s.id
         ORDER BY s.created_at DESC`
     )
@@ -849,7 +871,7 @@ function rescheduleSchedule(res, id, body) {
       .run(body.recur_dow, body.recur_time, id);
   }
   // Reabilita os alvos que nao foram enviados ainda (ou todos, para refazer).
-  db.prepare("UPDATE schedule_targets SET status = 'pending', sent_at = NULL, error = NULL WHERE schedule_id = ?").run(id);
+  db.prepare("UPDATE schedule_targets SET status = 'pending', sent_at = NULL, error = NULL, seq_step = 0 WHERE schedule_id = ? AND status != 'skipped_no_coverage'").run(id);
   return json(res, 200, { ok: true });
 }
 

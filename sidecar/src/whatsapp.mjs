@@ -18,6 +18,7 @@ import {
 } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import https from 'node:https';
 import { createRequire } from 'node:module';
 
 // require em ESM — para libs opcionais de proxy (carregadas sob demanda na Fase B).
@@ -156,6 +157,7 @@ export function createWhatsApp(db, sessionRootDir) {
     addAccount,
     removeAccount,
     setAccountProxy,
+    testProxy,
     bootReconnect,
     startAccount: (id) => getSession(id).start(),
     logoutAccount: (id) => getSession(id).logout(),
@@ -664,6 +666,24 @@ function maskProxy(url) {
   } catch {
     return 'proxy';
   }
+}
+
+// Testa um proxy: faz um GET via o agente e retorna o IP de saida (ou erro).
+function testProxy(url) {
+  return new Promise((resolve) => {
+    let agent = null;
+    try { agent = makeProxyAgent(url); } catch { /* invalido */ }
+    if (!agent) return resolve({ ok: false, error: 'URL de proxy inválida ou biblioteca ausente' });
+    const req = https.get('https://api.ipify.org?format=json', { agent, timeout: 8000 }, (res) => {
+      let data = '';
+      res.on('data', (c) => (data += c));
+      res.on('end', () => {
+        try { resolve({ ok: true, ip: JSON.parse(data).ip }); } catch { resolve({ ok: true }); }
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve({ ok: false, error: 'timeout (8s)' }); });
+    req.on('error', (e) => resolve({ ok: false, error: e?.message ?? 'falha na conexão' }));
+  });
 }
 
 // Cria o agente de proxy conforme o esquema da URL. As libs sao opcionais:

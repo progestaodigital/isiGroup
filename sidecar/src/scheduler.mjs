@@ -28,6 +28,27 @@ export function createScheduler(db, wa) {
   }
   const anyConnected = () => wa.isConnected() || wa.connectedAccountIds().length > 0;
 
+  // Chips do pool que sao membros do grupo E estao conectados (ordenados por id).
+  function memberConnectedChips(jid, pool) {
+    if (!Array.isArray(pool) || pool.length === 0) return [];
+    const ph = pool.map(() => '?').join(',');
+    const rows = db
+      .prepare(`SELECT DISTINCT account_id FROM targets WHERE jid = ? AND account_id IN (${ph})`)
+      .all(jid, ...pool);
+    return rows
+      .map((r) => r.account_id)
+      .filter((id) => id && wa.isAccountConnected(id))
+      .sort((a, b) => a - b);
+  }
+
+  // Resolve, EM TEMPO DE DISPARO, qual chip envia o alvo (rodizio por grupo +
+  // failover). pool vazio (single-chip) -> usa o fallback (geralmente a primaria).
+  function resolveChip(pool, offset, jid, fallbackAccountId, index) {
+    const covering = memberConnectedChips(jid, pool);
+    if (covering.length) return covering[(offset + index) % covering.length];
+    return fallbackAccountId; // chip fixo (se conectado) ou null = primaria
+  }
+
   function start() {
     // Re-hidratacao: agendamentos que ficaram 'sending' (app caiu no meio)
     // voltam para 'pending' e os alvos ja enviados continuam marcados como sent.
@@ -100,7 +121,7 @@ export function createScheduler(db, wa) {
         // Catch-up: se o app estava fora as 19:00 e subiu 19:10, ainda dispara hoje.
         db.prepare('UPDATE schedules SET last_run_at = ? WHERE id = ?').run(today, s.id);
         db.prepare(
-          "UPDATE schedule_targets SET status = 'pending', sent_at = NULL, error = NULL WHERE schedule_id = ?"
+          "UPDATE schedule_targets SET status = 'pending', sent_at = NULL, error = NULL, seq_step = 0 WHERE schedule_id = ?"
         ).run(s.id);
         console.error(`[sched] recorrente #${s.id} disparando ${today} ${hhmm}`);
         await sendPending(s.id, s); // status do schedule permanece 'active'
@@ -116,12 +137,26 @@ export function createScheduler(db, wa) {
   async function sendPending(scheduleId, schedule) {
     const targets = db
       .prepare(
-        `SELECT st.id, st.message_json, st.account_id, t.jid, t.name
+        `SELECT st.id, st.message_json, st.account_id, st.seq_step, t.jid, t.name
            FROM schedule_targets st
            JOIN targets t ON t.id = st.target_id
           WHERE st.schedule_id = ? AND st.status = 'pending'`
       )
       .all(scheduleId);
+
+    // Multi-chip: pool de chips selecionado + offset de rotacao (rodizio por execucao).
+    const pool = parseArr(schedule.account_ids_json);
+    const offset = schedule.rotation_offset || 0;
+    // Resolve o chip de cada alvo no disparo (rodizio + failover) e grava o real usado.
+    const chipFor = (tgt, i) => {
+      if (!pool.length) return tgt.account_id;
+      const acct = resolveChip(pool, offset, tgt.jid, tgt.account_id, i);
+      if (acct !== tgt.account_id) {
+        db.prepare('UPDATE schedule_targets SET account_id = ? WHERE id = ?').run(acct, tgt.id);
+        tgt.account_id = acct;
+      }
+      return acct;
+    };
 
     // Sequencia de mensagens (broadcast texto): 1+ passos com intervalo entre eles.
     if (schedule.content_mode === 'broadcast') {
@@ -129,7 +164,8 @@ export function createScheduler(db, wa) {
         .prepare('SELECT * FROM schedule_steps WHERE schedule_id = ? ORDER BY order_index')
         .all(scheduleId);
       if (steps.length > 0) {
-        await sendSequence(scheduleId, schedule, targets, steps);
+        await sendSequence(scheduleId, schedule, targets, steps, chipFor);
+        if (pool.length) bumpRotation(scheduleId);
         return;
       }
       // sem passos: agendamento legado (midia/poll/texto unico via default_json)
@@ -151,16 +187,17 @@ export function createScheduler(db, wa) {
 
     for (let i = 0; i < targets.length; i++) {
       const tgt = targets[i];
+      const acct = chipFor(tgt, i);
       const content = buildContent(schedule, tgt, media, mediaBuffer);
 
       try {
-        await sendVia(tgt.account_id, tgt.jid, content);
+        await sendVia(acct, tgt.jid, content);
         db.prepare(
           "UPDATE schedule_targets SET status = 'sent', sent_at = ?, error = NULL WHERE id = ?"
         ).run(new Date().toISOString(), tgt.id);
-        console.error(`[sched] enviado #${scheduleId}${tgt.account_id ? ` [chip ${tgt.account_id}]` : ''} -> ${tgt.name || tgt.jid}`);
+        console.error(`[sched] enviado #${scheduleId}${acct ? ` [chip ${acct}]` : ''} -> ${tgt.name || tgt.jid}`);
       } catch (e) {
-        if (!isReachable(tgt.account_id)) {
+        if (!isReachable(acct)) {
           console.error(`[sched] chip indisponivel durante #${scheduleId}; mantendo pendentes`);
           continue;
         }
@@ -172,6 +209,12 @@ export function createScheduler(db, wa) {
 
       if (i < targets.length - 1) await sleep(jitter());
     }
+    if (pool.length) bumpRotation(scheduleId);
+  }
+
+  // Avanca o offset de rotacao do schedule (rodizio entre execucoes).
+  function bumpRotation(scheduleId) {
+    db.prepare('UPDATE schedules SET rotation_offset = rotation_offset + 1 WHERE id = ?').run(scheduleId);
   }
 
   function finalizeStatus(scheduleId) {
@@ -197,14 +240,17 @@ export function createScheduler(db, wa) {
 
   // Envio de sequencia: cada passo vai para todos os alvos; entre passos,
   // espera uma janela aleatoria (step_min_s..step_max_s).
-  // Limitacao: queda mid-sequencia re-tenta a sequencia inteira (pode duplicar);
-  // refinamento de resumability fica para o Hardening (Fase 6).
-  async function sendSequence(scheduleId, schedule, targets, steps) {
+  // Resumability (#7): `seq_step` por alvo guarda o ultimo passo enviado; numa
+  // queda, ao re-rodar, cada alvo retoma de onde parou (sem reenviar passos).
+  async function sendSequence(scheduleId, schedule, targets, steps, chipFor) {
     const minMs = (schedule.step_min_s ?? 0) * 1000;
     const maxMs = Math.max(minMs, (schedule.step_max_s ?? schedule.step_min_s ?? 0) * 1000);
     const failed = {}; // target.id -> erro
     const stuck = new Set(); // alvos cujo chip caiu no meio -> seguem 'pending'
     const bufCache = new Map(); // media_path -> Buffer (le cada arquivo so uma vez)
+    // Cada alvo usa um unico chip em toda a sequencia (resolvido uma vez).
+    const chipByTarget = {};
+    targets.forEach((t, i) => { chipByTarget[t.id] = chipFor ? chipFor(t, i) : t.account_id; });
 
     for (let s = 0; s < steps.length; s++) {
       const step = steps[s];
@@ -226,13 +272,17 @@ export function createScheduler(db, wa) {
       for (let i = 0; i < targets.length; i++) {
         const tgt = targets[i];
         if (failed[tgt.id] || stuck.has(tgt.id)) continue;
+        if (s < (tgt.seq_step || 0)) continue; // passo ja enviado a este alvo (retomada)
+        const acct = chipByTarget[tgt.id];
         try {
-          await sendVia(tgt.account_id, tgt.jid, content);
-          console.error(`[sched] seq #${scheduleId} passo ${s + 1}/${steps.length} -> ${tgt.name || tgt.jid}`);
+          await sendVia(acct, tgt.jid, content);
+          db.prepare('UPDATE schedule_targets SET seq_step = ? WHERE id = ?').run(s + 1, tgt.id);
+          tgt.seq_step = s + 1;
+          console.error(`[sched] seq #${scheduleId} passo ${s + 1}/${steps.length}${acct ? ` [chip ${acct}]` : ''} -> ${tgt.name || tgt.jid}`);
         } catch (e) {
-          if (!isReachable(tgt.account_id)) {
+          if (!isReachable(acct)) {
             console.error(`[sched] chip indisponivel na sequencia #${scheduleId}; mantendo pendente`);
-            stuck.add(tgt.id); // segue 'pending' -> re-tenta a sequencia no proximo tick
+            stuck.add(tgt.id); // segue 'pending' -> retoma do seq_step no proximo tick
             continue;
           }
           failed[tgt.id] = e?.message ?? 'erro';
@@ -247,14 +297,14 @@ export function createScheduler(db, wa) {
       }
     }
 
-    // Marca status final por alvo (sequencia concluida).
+    // Marca status final por alvo (sequencia concluida). seq_step volta a 0.
     const now = new Date().toISOString();
     for (const tgt of targets) {
       if (stuck.has(tgt.id)) continue; // chip caiu -> permanece 'pending' (re-tenta)
       if (failed[tgt.id]) {
         db.prepare("UPDATE schedule_targets SET status = 'failed', error = ? WHERE id = ?").run(failed[tgt.id], tgt.id);
       } else {
-        db.prepare("UPDATE schedule_targets SET status = 'sent', sent_at = ?, error = NULL WHERE id = ?").run(now, tgt.id);
+        db.prepare("UPDATE schedule_targets SET status = 'sent', sent_at = ?, error = NULL, seq_step = 0 WHERE id = ?").run(now, tgt.id);
       }
     }
   }
@@ -334,6 +384,16 @@ function parseContent(jsonStr) {
     return JSON.parse(jsonStr ?? '{}');
   } catch {
     return { text: '' };
+  }
+}
+
+// Array de account_ids (pool de chips) a partir do JSON; [] se ausente/invalido.
+function parseArr(jsonStr) {
+  try {
+    const v = JSON.parse(jsonStr ?? '[]');
+    return Array.isArray(v) ? v.filter((n) => Number.isInteger(n)) : [];
+  } catch {
+    return [];
   }
 }
 

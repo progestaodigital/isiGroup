@@ -200,6 +200,12 @@ export const setAccountProxy = (
     ...jbody({ proxy_url, proxy_enabled }),
   });
 
+export const testProxy = (proxy_url: string) =>
+  sidecar<{ ok: boolean; ip?: string; error?: string }>("/proxy/test", {
+    method: "POST",
+    ...jbody({ proxy_url }),
+  });
+
 // Cobertura group-first: quais chips cobrem cada grupo selecionado.
 export interface Coverage {
   total_groups: number;
@@ -258,6 +264,8 @@ export interface ScheduleRow {
   total: number;
   sent: number | null;
   failed: number | null;
+  skipped: number | null;
+  chips: string | null; // labels dos chips usados (GROUP_CONCAT), multi-chip
 }
 
 export type PayloadType = "text" | "image" | "audio" | "video" | "poll" | "sequence";
@@ -298,6 +306,7 @@ export interface NewSchedule {
   step_max_s?: number;
   media?: MediaInfo;
   poll?: PollSpec;
+  account_ids?: number[]; // pool de chips (multi-chip) — scheduler rotaciona por execução
   targets: Array<{ target_id: number; account_id?: number | null; skipped?: boolean; message?: string }>;
 }
 
@@ -347,6 +356,7 @@ export interface Rule {
   pattern: string | null;
   case_sensitive: number;
   scope: string[];
+  account_ids: number[]; // chips permitidos (vazio = qualquer membro)
   actions: RuleAction[];
 }
 export interface NewRuleAction {
@@ -367,6 +377,7 @@ export interface NewRule {
   pattern?: string;
   case_sensitive: boolean;
   scope: string[]; // jids dos grupos; vazio = todos
+  account_ids?: number[]; // chips permitidos (multi-chip); vazio = qualquer membro
   actions: NewRuleAction[];
 }
 export interface AutoLog {

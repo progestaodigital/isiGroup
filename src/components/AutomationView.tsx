@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Account,
   ActionType,
   AutoLog,
   MatchType,
@@ -9,6 +10,7 @@ import {
   TriggerType,
   createRule,
   deleteRule,
+  listAccounts,
   listAutoLogs,
   listRules,
   listTargets,
@@ -211,8 +213,19 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // Multi-chip: chips permitidos (vazio = qualquer chip membro responde).
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [selectedChips, setSelectedChips] = useState<Set<number>>(new Set(editing?.account_ids ?? []));
+  useEffect(() => {
+    if (isPro) listAccounts().then((r) => setAccounts(r.accounts)).catch(() => {});
+  }, [isPro]);
+  const multiChip = isPro && accounts.length >= 2;
+
   function toggleScope(jid: string) {
     setScope((prev) => { const next = new Set(prev); next.has(jid) ? next.delete(jid) : next.add(jid); return next; });
+  }
+  function toggleChip(id: number) {
+    setSelectedChips((prev) => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
   }
   function patchAction(i: number, patch: Partial<ActionDraft>) {
     setActions((arr) => arr.map((a, j) => (j === i ? { ...a, ...patch } : a)));
@@ -265,6 +278,7 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
       pattern: trigger === "message" ? pattern : undefined,
       case_sensitive: caseSensitive,
       scope: [...scope],
+      account_ids: multiChip ? [...selectedChips] : undefined,
       actions: apiActions,
     };
 
@@ -325,19 +339,36 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
           <p className="muted small">Sincronize grupos primeiro.</p>
         ) : (
           <div className="picker">
-            {(isPro ? targets : targets.filter((t) => t.is_admin)).map((t) => (
-              <label key={t.id} className="pick">
+            {[...new Map((isPro ? targets : targets.filter((t) => t.is_admin)).map((t) => [t.jid, t])).values()].map((t) => (
+              <label key={t.jid} className="pick">
                 <input type="checkbox" checked={scope.has(t.jid)} onChange={() => toggleScope(t.jid)} />
-                <span>{t.name}{isPro && !t.is_admin && <span className="muted small"> (membro)</span>}</span>
+                <span>{t.name}{isPro && !multiChip && !t.is_admin && <span className="muted small"> (membro)</span>}</span>
               </label>
             ))}
           </div>
         )}
         <span className="hint">
           Selecione ao menos um grupo.
-          {isPro ? ' Ações como "Excluir do grupo" só funcionam onde você é admin.' : ""}
+          {isPro && !multiChip ? ' Ações como "Excluir do grupo" só funcionam onde você é admin.' : ""}
         </span>
       </div>
+
+      {multiChip && (
+        <div className="field">
+          <span>Chips que respondem ({selectedChips.size === 0 ? "qualquer" : selectedChips.size})</span>
+          <div className="picker">
+            {accounts.map((a) => (
+              <label key={a.id} className="pick">
+                <input type="checkbox" checked={selectedChips.has(a.id)} onChange={() => toggleChip(a.id)} />
+                <span>{a.label}<span className="muted small"> {a.status === "connected" ? `· ${a.admin_groups} admin` : "· offline"}</span></span>
+              </label>
+            ))}
+          </div>
+          <span className="hint">
+            Quem reage ao gatilho. <b>Vazio = qualquer chip</b> membro do grupo (o de menor id conectado). <b>Excluir</b> exige um chip admin.
+          </span>
+        </div>
+      )}
 
       <div className="field">
         <span>Ações</span>

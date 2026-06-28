@@ -115,6 +115,8 @@ function ScheduleList({ rows, onChange, recurring }: { rows: ScheduleRow[]; onCh
                     : new Date(s.scheduled_at!).toLocaleString("pt-BR")}{" "}
                   · {s.sent ?? 0}/{s.total} enviados
                   {s.failed ? `, ${s.failed} falha(s)` : ""}
+                  {s.skipped ? `, ${s.skipped} pulado(s)` : ""}
+                  {s.chips ? ` · chips: ${s.chips}` : ""}
                   {recurring && s.last_run_at ? ` · último: ${s.last_run_at}` : ""}
                 </div>
               </div>
@@ -287,6 +289,7 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
         scheduled_at: kind === "once" ? new Date(when).toISOString() : undefined,
         recur_dow: kind === "recurring" ? dow : undefined,
         recur_time: kind === "recurring" ? time : undefined,
+        account_ids: multiChip ? [...selectedChips] : undefined,
       };
       const built = await buildTargets();
 

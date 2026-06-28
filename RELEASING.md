@@ -27,6 +27,7 @@ corresponde à **pubkey** em `src-tauri/tauri.conf.json` (`plugins.updater.pubke
 - `package.json` → `"version"`
 - `src-tauri/tauri.conf.json` → `"version"`
 - `src-tauri/Cargo.toml` → `version`
+- `sidecar/package.json` → `"version"` (versão mostrada na tela "Sidecar"; o `prepare-sidecar` sincroniza no bundle, mas o dev lê este arquivo)
 
 (O app lê a versão do `tauri.conf.json` para comparar com o `latest.json`.)
 

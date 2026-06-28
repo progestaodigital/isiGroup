@@ -60,17 +60,22 @@ export function createAutomation(db, wa, editionState) {
     return true;
   }
 
-  // Chip que responde: menor account_id CONECTADO que seja membro do grupo.
-  // null = conta primaria (caminho single-chip).
-  function responderFor(jid) {
+  // Chip que responde: menor account_id CONECTADO membro do grupo, restrito aos
+  // chips permitidos pela regra (allowed vazio = qualquer). null = conta primaria.
+  const isAllowed = (allowed, id) => !allowed || allowed.length === 0 || allowed.includes(id);
+  function responderFor(jid, allowed) {
     const rows = db.prepare('SELECT DISTINCT account_id FROM targets WHERE jid = ? ORDER BY account_id').all(jid);
-    for (const r of rows) if (r.account_id && wa.isAccountConnected(r.account_id)) return r.account_id;
+    for (const r of rows) {
+      if (r.account_id && isAllowed(allowed, r.account_id) && wa.isAccountConnected(r.account_id)) return r.account_id;
+    }
     return null;
   }
-  // Para 'remove': menor chip conectado que seja ADMIN do grupo.
-  function adminResponderFor(jid) {
+  // Para 'remove': menor chip conectado que seja ADMIN do grupo (e permitido).
+  function adminResponderFor(jid, allowed) {
     const rows = db.prepare('SELECT account_id FROM targets WHERE jid = ? AND is_admin = 1 ORDER BY account_id').all(jid);
-    for (const r of rows) if (r.account_id && wa.isAccountConnected(r.account_id)) return r.account_id;
+    for (const r of rows) {
+      if (r.account_id && isAllowed(allowed, r.account_id) && wa.isAccountConnected(r.account_id)) return r.account_id;
+    }
     return null;
   }
 
@@ -113,8 +118,11 @@ export function createAutomation(db, wa, editionState) {
       .all(rule.id);
 
     const taken = [];
+    // Chips permitidos por esta automacao (vazio = qualquer chip membro).
+    let allowed = [];
+    try { const a = JSON.parse(rule.account_ids_json ?? '[]'); if (Array.isArray(a)) allowed = a; } catch { /* ignora */ }
     // Chip que responde (multi-chip): membro conectado de menor id; null = primaria.
-    const responder = responderFor(ctx.jid);
+    const responder = responderFor(ctx.jid, allowed);
     for (let ai = 0; ai < actions.length; ai++) {
       const action = actions[ai];
       const cfg = safeParse(action.config_json);
@@ -143,7 +151,7 @@ export function createAutomation(db, wa, editionState) {
             break;
           }
           // Remove exige um chip ADMIN daquele grupo (questao #6: por chip).
-          const adminResp = adminResponderFor(ctx.jid);
+          const adminResp = adminResponderFor(ctx.jid, allowed);
           if (!adminResp) {
             taken.push('remove_no_admin_chip');
             break;

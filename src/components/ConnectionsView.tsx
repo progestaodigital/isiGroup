@@ -9,6 +9,7 @@ import {
   logoutAccount,
   setAccountProxy,
   syncAccount,
+  testProxy,
 } from "../lib/api";
 
 const STATUS_LABEL: Record<string, string> = {
@@ -183,7 +184,18 @@ function ChipCard({
   const [savedProxy, setSavedProxy] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState("");
+  const [proxyTest, setProxyTest] = useState("");
   const s = account.status;
+
+  async function testProxyNow() {
+    setProxyTest("testando…");
+    try {
+      const r = await testProxy(proxyUrl.trim());
+      setProxyTest(r.ok ? `✓ ok${r.ip ? ` · IP ${r.ip}` : ""}` : `✗ ${r.error ?? "falhou"}`);
+    } catch {
+      setProxyTest("✗ falhou");
+    }
+  }
 
   async function sync() {
     setSyncing(true);
@@ -270,9 +282,13 @@ function ChipCard({
             <input type="checkbox" checked={proxyOn} onChange={(e) => setProxyOn(e.currentTarget.checked)} />
             Usar proxy neste chip
           </label>
-          <button className="link" onClick={saveProxy}>
-            {savedProxy ? "Salvo ✓ (aplica ao reconectar)" : "Salvar proxy"}
-          </button>
+          <div className="gate-actions" style={{ justifyContent: "flex-start" }}>
+            <button className="link subtle" onClick={testProxyNow} disabled={!proxyUrl.trim()}>Testar</button>
+            <button className="link" onClick={saveProxy}>
+              {savedProxy ? "Salvo ✓ (aplica ao reconectar)" : "Salvar proxy"}
+            </button>
+          </div>
+          {proxyTest && <span className="hint">{proxyTest}</span>}
         </div>
       )}
     </section>
