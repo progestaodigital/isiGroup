@@ -37,7 +37,7 @@
 
 ---
 
-## ✅ Entregue até agora (Milestone 1 — releases v0.1.0 / v0.1.1)
+## ✅ Entregue até agora (Milestones 1 e 2 — releases v0.1.0 → v0.1.4)
 
 **Fundação & conexão**
 - [x] App Tauri 2 + React/TS + sidecar Node (Baileys 7) + `node:sqlite`, IPC local com token — Fase 0 ✅
@@ -67,10 +67,19 @@
 - [x] **UX do app instalado:** consoles escondidos (`CREATE_NO_WINDOW`/`windowsHide`), arranque **não-bloqueante** com tela "Iniciando…"
 - [x] **Logo isi** aplicado: ícone do app, **ícone do instalador** (`nsis.installerIcon`) e tela de início
 - [x] **Redesign visual "Obsidian & Lime"** (lime `#ccff00`, vidro/glassmorphism, Space Grotesk + JetBrains Mono, grid/glow)
+- [x] **Polimento visual**: glow-spheres flutuantes + textura de ruído + grid no fundo, borda de vidro nos cards, brilhos/halo, scrollbars e seleção em lime
+- [x] **Paginação** (5 por lista, componente `Pager`): disparo único, recorrentes, automações e histórico
 - [x] **Auto-updater nativo assinado** (Tauri updater + minisign): a Visão geral baixa/instala a nova versão dentro do app e reinicia; manifesto `latest.json` no GitHub Releases; chave privada fora do repo
-- [x] **Releases v0.1.0 / v0.1.1 / v0.1.2 publicadas** (v0.1.2 = primeira com auto-update)
+- [x] `/health` reporta a **versão real** do sidecar (lida do `package.json`, sincronizada com o app no empacotamento)
 
-**Pendências conhecidas:** verificação ao vivo do **recorrente semanal**; **live runbook de licença** (7 cenários); estabilidade de `community_announce` (sem comunidades no teste atual).
+**Releases publicadas:**
+- **v0.1.0** — primeira versão · **v0.1.1** — webhook enriquecido + logo/ícones + redesign + UX
+- **v0.1.2** — primeira com **auto-update assinado** · **v0.1.3** — **Multi-chip (Pro)** (Milestone 2)
+- **v0.1.4** — polimento visual + paginação + correção da versão do sidecar
+
+**Multi-chip (Milestone 2):** ✅ código completo (A–F); ✅ verificado por smoke test; ⏳ **validação ao vivo com 2+ chips reais pendente**.
+
+**Pendências conhecidas:** validação ao vivo do **multi-chip** (2+ chips); verificação ao vivo do **recorrente semanal**; **live runbook de licença** (7 cenários); estabilidade de `community_announce` (sem comunidades no teste atual).
 
 > **Extra entregue:** `@all` (menção oculta / ping silencioso de todos os membros) no agendador — reversão consciente do "fora de escopo" original, a pedido do dono. ✅ confirmado ao vivo.
 
