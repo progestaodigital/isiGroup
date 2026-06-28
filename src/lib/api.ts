@@ -212,6 +212,7 @@ export const getCoverage = (group_jids: string[], account_ids: number[]) =>
 // Alvos
 export interface Target {
   id: number;
+  account_id?: number;
   jid: string;
   name: string;
   type: "group" | "community_announce" | "community_subgroup";
@@ -297,7 +298,7 @@ export interface NewSchedule {
   step_max_s?: number;
   media?: MediaInfo;
   poll?: PollSpec;
-  targets: Array<{ target_id: number; message?: string }>;
+  targets: Array<{ target_id: number; account_id?: number | null; skipped?: boolean; message?: string }>;
 }
 
 export const deleteSchedule = (id: number) =>

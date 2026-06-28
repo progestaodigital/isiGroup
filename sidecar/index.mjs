@@ -520,14 +520,17 @@ function createSchedule(res, body) {
     }
 
     const insTarget = db.prepare(
-      `INSERT INTO schedule_targets (schedule_id, target_id, message_json, status)
-       VALUES (?,?,?,'pending')`
+      `INSERT INTO schedule_targets (schedule_id, target_id, account_id, message_json, status)
+       VALUES (?,?,?,?,?)`
     );
     for (const t of targets) {
       const targetId = typeof t === 'object' ? t.target_id : t;
+      // Roteamento multi-chip: account_id define qual chip envia (null = primaria).
+      const accountId = typeof t === 'object' && Number.isInteger(t.account_id) ? t.account_id : null;
+      const skipped = typeof t === 'object' && t.skipped;
       const perText = typeof t === 'object' ? t.message : null;
       const msgJson = mode === 'per_target' && perText ? JSON.stringify({ text: String(perText) }) : null;
-      insTarget.run(scheduleId, targetId, msgJson);
+      insTarget.run(scheduleId, targetId, accountId, msgJson, skipped ? 'skipped_no_coverage' : 'pending');
     }
     db.exec('COMMIT;');
   } catch (e) {

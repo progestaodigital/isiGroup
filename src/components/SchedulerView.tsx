@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Account,
   ApiStep,
   PayloadType,
   ScheduleKind,
@@ -8,6 +9,8 @@ import {
   cancelSchedule,
   createSchedule,
   deleteSchedule,
+  getCoverage,
+  listAccounts,
   listSchedules,
   listTargets,
   rescheduleSchedule,
@@ -188,13 +191,80 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const selectedTargets = useMemo(() => targets.filter((t) => selected.has(t.id)), [targets, selected]);
+  // Multi-chip: chips disponíveis + seleção de quais usar (group-first).
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [selectedChips, setSelectedChips] = useState<Set<number>>(new Set());
+  const [uncovered, setUncovered] = useState(0);
+
+  useEffect(() => {
+    if (!isPro) return;
+    listAccounts()
+      .then((r) => {
+        setAccounts(r.accounts);
+        setSelectedChips(new Set(r.accounts.filter((a) => a.status === "connected").map((a) => a.id)));
+      })
+      .catch(() => {});
+  }, [isPro]);
+
+  const multiChip = isPro && accounts.length >= 2;
+
   // Na edição padrão, grupos onde a conta não é admin não são exibidos.
   const visibleTargets = useMemo(() => (isPro ? targets : targets.filter((t) => t.is_admin)), [targets, isPro]);
+  // Group-first: lista de grupos DISTINTOS (um chip pode ver o mesmo grupo).
+  const groups = useMemo(() => {
+    const seen = new Map<string, Target>();
+    for (const t of visibleTargets) if (!seen.has(t.jid)) seen.set(t.jid, t);
+    return [...seen.values()];
+  }, [visibleTargets]);
+  const selectedTargets = useMemo(() => groups.filter((t) => selected.has(t.id)), [groups, selected]);
   const uploadingAny = steps.some((s) => s.uploading);
+
+  // Prévia de cobertura: quantos grupos ficariam sem chip selecionado que os cubra.
+  useEffect(() => {
+    if (!multiChip || selectedTargets.length === 0 || selectedChips.size === 0) {
+      setUncovered(0);
+      return;
+    }
+    getCoverage(selectedTargets.map((t) => t.jid), [...selectedChips])
+      .then((c) => setUncovered(c.uncovered.length))
+      .catch(() => {});
+  }, [multiChip, selectedTargets, selectedChips]);
 
   function toggle(id: number) {
     setSelected((prev) => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
+  }
+  function toggleChip(id: number) {
+    setSelectedChips((prev) => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
+  }
+
+  // Monta a lista de alvos roteada por chip (round-robin por grupo). Em 1 chip,
+  // retorna os alvos sem account_id (envio pela conta primária — igual a antes).
+  async function buildTargets(): Promise<
+    Array<{ target_id: number; account_id?: number | null; message?: string; skipped?: boolean }>
+  > {
+    if (!multiChip) {
+      return selectedTargets.map((t) =>
+        mode === "per_target" ? { target_id: t.id, message: perText[t.id] ?? "" } : { target_id: t.id }
+      );
+    }
+    const cov = await getCoverage(selectedTargets.map((t) => t.jid), [...selectedChips]);
+    const coverMap: Record<string, number[]> = {};
+    for (const acc of cov.by_account) for (const j of acc.jids) (coverMap[j] ??= []).push(acc.account_id);
+    let rr = 0;
+    const out: Array<{ target_id: number; account_id?: number | null; message?: string; skipped?: boolean }> = [];
+    for (const g of selectedTargets) {
+      const covering = coverMap[g.jid] ?? [];
+      const msg = mode === "per_target" ? { message: perText[g.id] ?? "" } : {};
+      if (covering.length === 0) {
+        out.push({ target_id: g.id, account_id: null, skipped: true, ...msg });
+        continue;
+      }
+      const acc = covering[rr % covering.length];
+      rr++;
+      const row = targets.find((t) => t.jid === g.jid && t.account_id === acc) ?? g;
+      out.push({ target_id: row.id, account_id: acc, ...msg });
+    }
+    return out;
   }
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -202,6 +272,8 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
     if (kind === "once" && !when) return setErr("Defina data e hora.");
     if (kind === "recurring" && !time) return setErr("Defina o horário.");
     if (selected.size === 0) return setErr("Selecione ao menos um grupo.");
+
+    if (multiChip && selectedChips.size === 0) return setErr("Selecione ao menos um chip.");
 
     const factor = intUnit === "min" ? 60 : 1;
     setBusy(true);
@@ -213,13 +285,14 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
         recur_dow: kind === "recurring" ? dow : undefined,
         recur_time: kind === "recurring" ? time : undefined,
       };
+      const built = await buildTargets();
 
       if (mode === "per_target") {
         await createSchedule({
           ...base,
           content_mode: "per_target",
           payload_type: "text",
-          targets: selectedTargets.map((t) => ({ target_id: t.id, message: perText[t.id] ?? "" })),
+          targets: built,
         });
       } else {
         const apiSteps: ApiStep[] = [];
@@ -235,7 +308,7 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
           steps: apiSteps,
           step_min_s: apiSteps.length > 1 ? Math.round(intMin * factor) : undefined,
           step_max_s: apiSteps.length > 1 ? Math.round(intMax * factor) : undefined,
-          targets: selectedTargets.map((t) => ({ target_id: t.id })),
+          targets: built,
         });
       }
       onCreated();
@@ -312,22 +385,49 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
       {/* GRUPOS */}
       <div className="field">
         <span>Grupos ({selected.size} selecionado{selected.size === 1 ? "" : "s"})</span>
-        {visibleTargets.length === 0 ? (
+        {groups.length === 0 ? (
           <p className="muted small">Nenhum grupo disponível. Sincronize em "Grupos & Comunidades".</p>
         ) : (
           <div className="picker">
-            {visibleTargets.map((t) => (
+            {groups.map((t) => (
               <label key={t.id} className="pick">
                 <input type="checkbox" checked={selected.has(t.id)} onChange={() => toggle(t.id)} />
-                <span>{t.name}{isPro && !t.is_admin && <span className="muted small"> (membro)</span>}</span>
+                <span>{t.name}{isPro && !multiChip && !t.is_admin && <span className="muted small"> (membro)</span>}</span>
               </label>
             ))}
           </div>
         )}
-        {isPro && (
+        {isPro && !multiChip && (
           <span className="hint">Em grupos onde só admins enviam, mensagens de membro podem falhar.</span>
         )}
       </div>
+
+      {/* CHIPS (multi-chip): quais chips usar; rotação round-robin por grupo */}
+      {multiChip && (
+        <div className="field">
+          <span>Chips ({selectedChips.size} selecionado{selectedChips.size === 1 ? "" : "s"})</span>
+          <div className="picker">
+            {accounts.map((a) => (
+              <label key={a.id} className={`pick ${a.status !== "connected" ? "locked" : ""}`}>
+                <input
+                  type="checkbox"
+                  checked={selectedChips.has(a.id)}
+                  disabled={a.status !== "connected"}
+                  onChange={() => toggleChip(a.id)}
+                />
+                <span>
+                  {a.label}
+                  <span className="muted small"> {a.status === "connected" ? `· ${a.admin_groups} admin` : "· offline"}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+          <span className="hint">
+            Cada grupo é enviado por um chip que seja membro dele (rodízio entre os chips).
+            {uncovered > 0 && <> <b>{uncovered} grupo(s)</b> sem chip que os cubra serão pulados.</>}
+          </span>
+        </div>
+      )}
 
       {/* PER-TARGET: texto por grupo */}
       {mode === "per_target" && selectedTargets.length > 0 && (

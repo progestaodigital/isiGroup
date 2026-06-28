@@ -16,6 +16,18 @@ export function createScheduler(db, wa) {
   const inFlight = new Set();
   let timer = null;
 
+  // Roteamento por chip (Milestone 2). account_id nulo = conta primaria.
+  const isReachable = (accountId) =>
+    accountId ? wa.isAccountConnected(accountId) : wa.isConnected();
+  function sendVia(accountId, jid, content) {
+    if (accountId) {
+      if (!wa.isAccountConnected(accountId)) throw new Error('chip desconectado');
+      return wa.accountSend(accountId, jid, content);
+    }
+    return wa.sendContent(jid, content); // conta primaria (single-chip)
+  }
+  const anyConnected = () => wa.isConnected() || wa.connectedAccountIds().length > 0;
+
   function start() {
     // Re-hidratacao: agendamentos que ficaram 'sending' (app caiu no meio)
     // voltam para 'pending' e os alvos ja enviados continuam marcados como sent.
@@ -30,7 +42,7 @@ export function createScheduler(db, wa) {
   }
 
   async function tick() {
-    if (!wa.isConnected()) return; // sem conexao, nao dispara; tenta no proximo tick
+    if (!anyConnected()) return; // nenhum chip conectado; tenta no proximo tick
     await tickOnce();
     await tickRecurring();
   }
@@ -104,7 +116,7 @@ export function createScheduler(db, wa) {
   async function sendPending(scheduleId, schedule) {
     const targets = db
       .prepare(
-        `SELECT st.id, st.message_json, t.jid, t.name
+        `SELECT st.id, st.message_json, st.account_id, t.jid, t.name
            FROM schedule_targets st
            JOIN targets t ON t.id = st.target_id
           WHERE st.schedule_id = ? AND st.status = 'pending'`
@@ -142,15 +154,15 @@ export function createScheduler(db, wa) {
       const content = buildContent(schedule, tgt, media, mediaBuffer);
 
       try {
-        await wa.sendContent(tgt.jid, content);
+        await sendVia(tgt.account_id, tgt.jid, content);
         db.prepare(
           "UPDATE schedule_targets SET status = 'sent', sent_at = ?, error = NULL WHERE id = ?"
         ).run(new Date().toISOString(), tgt.id);
-        console.error(`[sched] enviado #${scheduleId} -> ${tgt.name || tgt.jid}`);
+        console.error(`[sched] enviado #${scheduleId}${tgt.account_id ? ` [chip ${tgt.account_id}]` : ''} -> ${tgt.name || tgt.jid}`);
       } catch (e) {
-        if (!wa.isConnected()) {
-          console.error(`[sched] conexao caiu durante #${scheduleId}; mantendo pendentes`);
-          break;
+        if (!isReachable(tgt.account_id)) {
+          console.error(`[sched] chip indisponivel durante #${scheduleId}; mantendo pendentes`);
+          continue;
         }
         db.prepare("UPDATE schedule_targets SET status = 'failed', error = ? WHERE id = ?").run(
           e?.message ?? 'erro', tgt.id
@@ -191,6 +203,7 @@ export function createScheduler(db, wa) {
     const minMs = (schedule.step_min_s ?? 0) * 1000;
     const maxMs = Math.max(minMs, (schedule.step_max_s ?? schedule.step_min_s ?? 0) * 1000);
     const failed = {}; // target.id -> erro
+    const stuck = new Set(); // alvos cujo chip caiu no meio -> seguem 'pending'
     const bufCache = new Map(); // media_path -> Buffer (le cada arquivo so uma vez)
 
     for (let s = 0; s < steps.length; s++) {
@@ -212,14 +225,15 @@ export function createScheduler(db, wa) {
 
       for (let i = 0; i < targets.length; i++) {
         const tgt = targets[i];
-        if (failed[tgt.id]) continue;
+        if (failed[tgt.id] || stuck.has(tgt.id)) continue;
         try {
-          await wa.sendContent(tgt.jid, content);
+          await sendVia(tgt.account_id, tgt.jid, content);
           console.error(`[sched] seq #${scheduleId} passo ${s + 1}/${steps.length} -> ${tgt.name || tgt.jid}`);
         } catch (e) {
-          if (!wa.isConnected()) {
-            console.error(`[sched] conexao caiu na sequencia #${scheduleId}; mantendo pendente`);
-            return; // alvos seguem 'pending' -> re-tenta no proximo tick
+          if (!isReachable(tgt.account_id)) {
+            console.error(`[sched] chip indisponivel na sequencia #${scheduleId}; mantendo pendente`);
+            stuck.add(tgt.id); // segue 'pending' -> re-tenta a sequencia no proximo tick
+            continue;
           }
           failed[tgt.id] = e?.message ?? 'erro';
         }
@@ -236,6 +250,7 @@ export function createScheduler(db, wa) {
     // Marca status final por alvo (sequencia concluida).
     const now = new Date().toISOString();
     for (const tgt of targets) {
+      if (stuck.has(tgt.id)) continue; // chip caiu -> permanece 'pending' (re-tenta)
       if (failed[tgt.id]) {
         db.prepare("UPDATE schedule_targets SET status = 'failed', error = ? WHERE id = ?").run(failed[tgt.id], tgt.id);
       } else {
