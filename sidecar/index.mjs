@@ -135,6 +135,70 @@ async function route(req, res, url) {
     return json(res, 200, wa.getState());
   }
 
+  // --- Contas / chips (multi-chip, Milestone 2) ---
+  if (match('GET', '/accounts')) {
+    return json(res, 200, { accounts: wa.listAccounts(), edition: editionState.edition });
+  }
+  if (match('POST', '/accounts')) {
+    const b = await readJson(req);
+    // Gating: free = 1 chip; pro = ilimitado (enforcement no sidecar, nao so na UI).
+    const count = db.prepare('SELECT COUNT(*) AS n FROM accounts').get().n;
+    if (editionState.edition !== 'pro' && count >= 1) {
+      return json(res, 403, { error: 'pro_required', message: 'Multiplos chips sao exclusivos do plano Pro.' });
+    }
+    const id = wa.addAccount(b?.label);
+    return json(res, 201, { id });
+  }
+  const acctConnect = path.match(/^\/accounts\/(\d+)\/connect$/);
+  if (method === 'POST' && acctConnect) {
+    const id = Number(acctConnect[1]);
+    // Free: so a conta primaria pode conectar (trava de 2o chip tambem no connect).
+    if (editionState.edition !== 'pro') {
+      const primary = db.prepare('SELECT id FROM accounts ORDER BY id LIMIT 1').get();
+      if (primary && id !== primary.id) {
+        return json(res, 403, { error: 'pro_required', message: 'Multiplos chips sao exclusivos do plano Pro.' });
+      }
+    }
+    wa.startAccount(id);
+    return json(res, 202, wa.getAccountState(id));
+  }
+  const acctLogout = path.match(/^\/accounts\/(\d+)\/logout$/);
+  if (method === 'POST' && acctLogout) {
+    await wa.logoutAccount(Number(acctLogout[1]));
+    return json(res, 200, wa.getAccountState(Number(acctLogout[1])));
+  }
+  const acctStatus = path.match(/^\/accounts\/(\d+)\/status$/);
+  if (method === 'GET' && acctStatus) {
+    return json(res, 200, wa.getAccountState(Number(acctStatus[1])));
+  }
+  const acctSync = path.match(/^\/accounts\/(\d+)\/sync$/);
+  if (method === 'POST' && acctSync) {
+    try {
+      return json(res, 200, await wa.syncTargetsForAccount(Number(acctSync[1])));
+    } catch (err) {
+      return json(res, 409, { error: 'not_connected', message: err.message });
+    }
+  }
+  const acctProxy = path.match(/^\/accounts\/(\d+)\/proxy$/);
+  if (method === 'POST' && acctProxy) {
+    const b = await readJson(req);
+    if (b?.proxy_url && !/^(socks5?|https?):\/\//i.test(String(b.proxy_url))) {
+      return json(res, 400, { error: 'bad_request', message: 'proxy deve ser socks5:// ou http(s)://' });
+    }
+    wa.setAccountProxy(Number(acctProxy[1]), b?.proxy_url ?? null, !!b?.proxy_enabled);
+    return json(res, 200, { ok: true });
+  }
+  const acctDel = path.match(/^\/accounts\/(\d+)$/);
+  if (method === 'DELETE' && acctDel) {
+    const id = Number(acctDel[1]);
+    const primary = db.prepare('SELECT id FROM accounts ORDER BY id LIMIT 1').get();
+    if (primary && id === primary.id) {
+      return json(res, 409, { error: 'cannot_remove_primary', message: 'A conta principal nao pode ser removida.' });
+    }
+    await wa.removeAccount(id);
+    return json(res, 200, { ok: true });
+  }
+
   // --- Alvos (grupos/comunidades) ---
   if (match('POST', '/targets/sync')) {
     try {

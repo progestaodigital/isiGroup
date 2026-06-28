@@ -159,6 +159,47 @@ export const getConnectionStatus = () =>
 export const logoutConnection = () =>
   sidecar<ConnectionState>("/connection/logout", { method: "POST" });
 
+// --- Contas / chips (multi-chip, Milestone 2) ---
+export interface Account {
+  id: number;
+  label: string;
+  jid: string | null;
+  proxy_url: string | null;
+  proxy_enabled: boolean;
+  status: ConnStatus;
+  qr: string | null;
+  me: { jid: string; lid?: string | null; name: string | null } | null;
+  groups: number;
+  admin_groups: number;
+}
+
+export const listAccounts = () =>
+  sidecar<{ accounts: Account[]; edition: string }>("/accounts");
+export const addAccount = (label: string) =>
+  sidecar<{ id?: number; error?: string; message?: string }>("/accounts", {
+    method: "POST",
+    ...jbody({ label }),
+  });
+export const deleteAccount = (id: number) =>
+  sidecar<{ ok?: boolean; error?: string; message?: string }>(`/accounts/${id}`, {
+    method: "DELETE",
+  });
+export const connectAccount = (id: number) =>
+  sidecar<{ status: ConnStatus }>(`/accounts/${id}/connect`, { method: "POST" });
+export const logoutAccount = (id: number) =>
+  sidecar<{ status: ConnStatus }>(`/accounts/${id}/logout`, { method: "POST" });
+export const syncAccount = (id: number) =>
+  sidecar<SyncResult>(`/accounts/${id}/sync`, { method: "POST" });
+export const setAccountProxy = (
+  id: number,
+  proxy_url: string | null,
+  proxy_enabled: boolean
+) =>
+  sidecar<{ ok?: boolean; error?: string; message?: string }>(`/accounts/${id}/proxy`, {
+    method: "POST",
+    ...jbody({ proxy_url, proxy_enabled }),
+  });
+
 // Alvos
 export interface Target {
   id: number;

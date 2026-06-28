@@ -10,7 +10,7 @@ import {
   getHwidMasked,
   setSidecarEdition,
 } from "../lib/api";
-import { ConnectionView } from "./ConnectionView";
+import { ConnectionsView } from "./ConnectionsView";
 import { TargetsView } from "./TargetsView";
 import { SchedulerView } from "./SchedulerView";
 import { AutomationView } from "./AutomationView";
@@ -93,7 +93,7 @@ export function MainShell({ license, onLicenseChange }: Props) {
       <main className="content">
         {view === "overview" && <Overview license={license} onGo={setView} />}
         {view === "connection" && (
-          <ConnectionView onConnected={() => setView("targets")} />
+          <ConnectionsView isPro={isPro} onConnected={() => setView("targets")} />
         )}
         {view === "targets" && <TargetsView />}
         {view === "scheduler" && <SchedulerView isPro={isPro} />}
