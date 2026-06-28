@@ -15,17 +15,49 @@ export function createAutomation(db, wa, editionState) {
     return !!t && !!t.is_admin;
   }
 
+  // Nome do grupo a partir dos alvos sincronizados.
+  function groupName(jid) {
+    const t = db.prepare('SELECT name FROM targets WHERE jid = ? LIMIT 1').get(jid);
+    return t?.name ?? null;
+  }
+
+  // Monta o corpo do webhook com os dados do lead/grupo/automacao.
+  function buildPayload(triggerType, rule, ctx) {
+    const now = new Date();
+    const event =
+      triggerType === 'join'
+        ? 'group.member_joined'
+        : triggerType === 'leave'
+          ? 'group.member_left'
+          : 'automation.match';
+    return {
+      event,
+      automation: rule.name, // nome da automacao
+      group: { jid: ctx.jid, name: groupName(ctx.jid) }, // nome do grupo
+      lead: {
+        name: ctx.name ?? null, // nome usado no whatsapp (pushName/contato)
+        phone: ctx.phone ?? null, // ex: "5521996687008"
+        jid: ctx.sender ?? null,
+      },
+      message: ctx.text ?? null, // mensagem do lead (se aplicavel)
+      date: localDate(now), // data (local) AAAA-MM-DD
+      time: localTime(now), // hora (local) HH:MM:SS
+      timestamp: now.toISOString(),
+    };
+  }
+
   // Mensagem recebida em grupo -> gatilhos 'message' e 'message_link'.
-  async function onMessage({ jid, sender, text, raw }) {
-    if (!text) return;
-    const ctx = { jid, sender, text, raw };
-    await runTrigger('message', ctx);
-    await runTrigger('message_link', ctx);
+  // info: { jid, sender, phone, name, text, raw }
+  async function onMessage(info) {
+    if (!info?.text) return;
+    await runTrigger('message', info);
+    await runTrigger('message_link', info);
   }
 
   // Entrada/saida de membro -> gatilho 'join' | 'leave'.
-  async function onMembership(eventType, { jid, sender }) {
-    await runTrigger(eventType, { jid, sender });
+  // info: { jid, sender, phone, name }
+  async function onMembership(eventType, info) {
+    await runTrigger(eventType, info);
   }
 
   async function runTrigger(triggerType, ctx) {
@@ -113,8 +145,8 @@ export function createAutomation(db, wa, editionState) {
     ).run(
       rule.id,
       ctx.jid,
-      jidToE164(ctx.sender),
-      (ctx.text ?? `[${triggerType}]`).slice(0, 500),
+      ctx.phone ?? (ctx.name ? ctx.name : null),
+      (ctx.text ?? `[${triggerType}] ${ctx.name ?? ''}`).slice(0, 500),
       taken.join(','),
       new Date().toISOString()
     );
@@ -197,24 +229,15 @@ function waveformBuffer(json) {
 }
 
 // Payload do webhook conforme o gatilho (espelha os contratos do planejamento).
-function buildPayload(triggerType, rule, ctx) {
-  const timestamp = new Date().toISOString();
-  if (triggerType === 'message') {
-    return {
-      event: 'automation.match',
-      timestamp,
-      rule: { name: rule.name, match_type: rule.match_type, pattern: rule.pattern },
-      group: { jid: ctx.jid },
-      sender: { jid: ctx.sender, phone_e164: jidToE164(ctx.sender) },
-      message: { text: ctx.text },
-    };
-  }
-  return {
-    event: triggerType === 'join' ? 'group.member_joined' : 'group.member_left',
-    timestamp,
-    group: { jid: ctx.jid },
-    member: { jid: ctx.sender, phone_e164: jidToE164(ctx.sender) },
-  };
+// Data/hora locais (fuso da maquina do usuario) para os campos do webhook.
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+function localDate(d) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+function localTime(d) {
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
 
 function inScope(rule, jid) {
@@ -251,16 +274,6 @@ export function hasUrl(text) {
   const tld =
     /(^|[^@\w])[a-z0-9-]+(\.[a-z0-9-]+)*\.(com|net|org|io|gov|edu|me|app|co|info|biz|tv|xyz|site|online|store|shop|dev|link|br|pt|us|uk|ai|gg|to)(\/\S*)?/i;
   return tld.test(t);
-}
-
-// Best-effort: E.164 quando o jid e numero (@s.whatsapp.net); @lid nao resolve (questao #6).
-function jidToE164(jid) {
-  if (typeof jid !== 'string') return null;
-  if (jid.includes('@s.whatsapp.net')) {
-    const user = jid.split('@')[0].split(':')[0];
-    return /^\d+$/.test(user) ? `+${user}` : null;
-  }
-  return null;
 }
 
 function safeParse(s) {

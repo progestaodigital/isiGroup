@@ -34,6 +34,10 @@ export function createWhatsApp(db, sessionDir) {
   let messageHandler = null; // (info) => Promise — gatilho de mensagem
   let membershipHandler = null; // (eventType, info) => Promise — entrou/saiu
 
+  // Caches para enriquecer os webhooks: nome (pushName/contatos) e telefone por id.
+  const nameById = new Map(); // jid/lid -> nome de exibicao
+  const phoneById = new Map(); // lid -> telefone (somente digitos)
+
   const state = {
     status: 'disconnected', // disconnected | connecting | qr | connected
     qr: null, // data URL do QR quando status === 'qr'
@@ -77,7 +81,17 @@ export function createWhatsApp(db, sessionDir) {
           if (m.key?.fromMe) continue;
           const j = m.key?.remoteJid;
           if (!j || !j.endsWith('@g.us')) continue;
-          const info = { jid: j, sender: m.key.participant ?? null, text: extractText(m), raw: m };
+          const sender = m.key.participant ?? null;
+          // Cacheia o nome de exibicao do remetente (pushName).
+          if (sender && m.pushName) nameById.set(sender, m.pushName);
+          const info = {
+            jid: j,
+            sender,
+            phone: (sender && phoneById.get(sender)) || null,
+            name: m.pushName || (sender && nameById.get(sender)) || null,
+            text: extractText(m),
+            raw: m,
+          };
           if (info.text) {
             Promise.resolve(messageHandler(info)).catch((e) =>
               console.error('[wa] erro no handler de mensagem:', e?.message)
@@ -85,6 +99,18 @@ export function createWhatsApp(db, sessionDir) {
           }
         }
       });
+
+      // Atualizacoes de contatos -> cacheia nomes (para join/leave).
+      const cacheContacts = (contacts) => {
+        for (const c of contacts ?? []) {
+          const nm = c.name || c.notify || c.verifiedName;
+          if (c.id && nm) nameById.set(c.id, nm);
+        }
+      };
+      sock.ev.on('contacts.upsert', cacheContacts);
+      sock.ev.on('contacts.update', cacheContacts);
+      // Sync inicial do historico tambem traz contatos (nomes).
+      sock.ev.on('messaging-history.set', (h) => cacheContacts(h?.contacts));
 
       // Entrada/saida de membros (gatilhos 'join'/'leave').
       sock.ev.on('group-participants.update', (ev) => {
@@ -94,7 +120,15 @@ export function createWhatsApp(db, sessionDir) {
         const eventType = action === 'add' ? 'join' : action === 'remove' ? 'leave' : null;
         if (!jid || !eventType) return;
         for (const participant of ev.participants ?? []) {
-          Promise.resolve(membershipHandler(eventType, { jid, sender: participant })).catch((e) =>
+          // O participante pode vir como string (@lid) ou objeto { id, phoneNumber }.
+          const id = typeof participant === 'object' ? participant.id : participant;
+          const phone =
+            digitsOnly(typeof participant === 'object' ? participant.phoneNumber : null) ||
+            phoneById.get(id) ||
+            (typeof id === 'string' && id.includes('@s.whatsapp.net') ? digitsOnly(id) : null);
+          if (id && phone) phoneById.set(id, phone);
+          const info = { jid, sender: id, phone, name: (id && nameById.get(id)) || null };
+          Promise.resolve(membershipHandler(eventType, info)).catch((e) =>
             console.error('[wa] erro no handler de membership:', e?.message)
           );
         }
@@ -436,6 +470,14 @@ function extractText(m) {
     msg.videoMessage?.caption ||
     ''
   );
+}
+
+// Extrai apenas os digitos do telefone de um jid/numero (ex: "5521...@s.whatsapp.net" -> "5521...").
+function digitsOnly(x) {
+  if (!x) return null;
+  const user = String(x).split('@')[0].split(':')[0];
+  const d = user.replace(/\D/g, '');
+  return d || null;
 }
 
 // Detecta o token @all como palavra isolada (case-insensitive).
