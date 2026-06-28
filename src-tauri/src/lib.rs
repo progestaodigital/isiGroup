@@ -101,6 +101,8 @@ fn get_app_version(app: tauri::AppHandle) -> String {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // Estado inicial "carregando": a janela abre na hora e mostra a tela
             // de loading enquanto a inicializacao pesada roda em segundo plano.

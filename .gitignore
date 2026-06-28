@@ -36,3 +36,8 @@ src-tauri/resources/*
 *.db-shm
 wa-session/
 media/
+
+# Chave privada de assinatura do updater (NUNCA commitar) — a publica fica em tauri.conf.json
+isigroup-updater.key
+isigroup-updater.key.pub
+.env.signing
