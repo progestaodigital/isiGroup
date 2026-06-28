@@ -199,6 +199,16 @@ async function route(req, res, url) {
     return json(res, 200, { ok: true });
   }
 
+  // --- Cobertura (multi-chip): quais chips sao membros de quais grupos ---
+  if (match('POST', '/coverage')) {
+    const b = await readJson(req);
+    const groupJids = Array.isArray(b?.group_jids) ? b.group_jids.map(String) : [];
+    const accountIds = Array.isArray(b?.account_ids)
+      ? b.account_ids.map(Number).filter(Number.isInteger)
+      : [];
+    return json(res, 200, computeCoverage(groupJids, accountIds));
+  }
+
   // --- Alvos (grupos/comunidades) ---
   if (match('POST', '/targets/sync')) {
     try {
@@ -298,6 +308,41 @@ function readJson(req) {
     });
     req.on('error', () => resolve({}));
   });
+}
+
+// Cobertura group-first: dado um conjunto de grupos + chips candidatos, calcula
+// quais chips cobrem cada grupo (sao membros) e quais grupos ficam descobertos.
+function computeCoverage(groupJids, accountIds) {
+  const gset = new Set(groupJids);
+  if (groupJids.length === 0) return { total_groups: 0, by_account: [], uncovered: [] };
+
+  const nameByJid = {};
+  const nameRows = db
+    .prepare(`SELECT DISTINCT jid, name FROM targets WHERE jid IN (${groupJids.map(() => '?').join(',')})`)
+    .all(...groupJids);
+  for (const r of nameRows) nameByJid[r.jid] = r.name;
+
+  const coveredBy = {}; // jid -> Set(accountId)
+  let accts = [];
+  if (accountIds.length) {
+    const ph = accountIds.map(() => '?').join(',');
+    accts = db.prepare(`SELECT id, label FROM accounts WHERE id IN (${ph})`).all(...accountIds);
+    const rows = db.prepare(`SELECT account_id, jid FROM targets WHERE account_id IN (${ph})`).all(...accountIds);
+    for (const r of rows) {
+      if (!gset.has(r.jid)) continue;
+      (coveredBy[r.jid] ??= new Set()).add(r.account_id);
+    }
+  }
+
+  const by_account = accts.map((a) => {
+    const jids = groupJids.filter((j) => coveredBy[j]?.has(a.id));
+    return { account_id: a.id, label: a.label, covers: jids.length, jids };
+  });
+  const uncovered = groupJids
+    .filter((j) => !coveredBy[j] || coveredBy[j].size === 0)
+    .map((j) => ({ jid: j, name: nameByJid[j] ?? null }));
+
+  return { total_groups: groupJids.length, by_account, uncovered };
 }
 
 // --- Handlers de agendamento ---

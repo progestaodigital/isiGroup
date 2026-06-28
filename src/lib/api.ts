@@ -200,6 +200,15 @@ export const setAccountProxy = (
     ...jbody({ proxy_url, proxy_enabled }),
   });
 
+// Cobertura group-first: quais chips cobrem cada grupo selecionado.
+export interface Coverage {
+  total_groups: number;
+  by_account: { account_id: number; label: string; covers: number; jids: string[] }[];
+  uncovered: { jid: string; name: string | null }[];
+}
+export const getCoverage = (group_jids: string[], account_ids: number[]) =>
+  sidecar<Coverage>("/coverage", { method: "POST", ...jbody({ group_jids, account_ids }) });
+
 // Alvos
 export interface Target {
   id: number;

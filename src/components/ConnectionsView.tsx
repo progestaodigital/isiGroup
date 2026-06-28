@@ -8,6 +8,7 @@ import {
   connectAccount,
   logoutAccount,
   setAccountProxy,
+  syncAccount,
 } from "../lib/api";
 
 const STATUS_LABEL: Record<string, string> = {
@@ -180,7 +181,22 @@ function ChipCard({
   const [proxyUrl, setProxyUrl] = useState(account.proxy_url ?? "");
   const [proxyOn, setProxyOn] = useState(account.proxy_enabled);
   const [savedProxy, setSavedProxy] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState("");
   const s = account.status;
+
+  async function sync() {
+    setSyncing(true);
+    setSyncMsg("");
+    try {
+      const r = await syncAccount(account.id);
+      setSyncMsg(r.error ? r.message ?? "falha" : `${r.synced ?? 0} grupos (${r.admin ?? 0} admin)`);
+    } catch {
+      setSyncMsg("falha ao sincronizar");
+    } finally {
+      setSyncing(false);
+    }
+  }
 
   async function saveProxy() {
     await setAccountProxy(account.id, proxyUrl.trim() || null, proxyOn);
@@ -223,6 +239,11 @@ function ChipCard({
         {s === "disconnected" && (
           <button onClick={onConnect} disabled={busy}>{busy ? "Iniciando…" : "Conectar"}</button>
         )}
+        {s === "connected" && (
+          <button className="link" onClick={sync} disabled={syncing}>
+            {syncing ? "Sincronizando…" : "Sincronizar grupos"}
+          </button>
+        )}
         {(s === "connected" || s === "qr" || s === "connecting") && (
           <button className="link" onClick={onDisconnect} disabled={busy}>
             {s === "connected" ? "Desconectar" : "Cancelar"}
@@ -235,6 +256,7 @@ function ChipCard({
           <button className="link danger" onClick={onRemove} disabled={busy}>Remover</button>
         )}
       </div>
+      {syncMsg && <p className="hint">{syncMsg}</p>}
 
       {isPro && showProxy && (
         <div className="reschedule" style={{ flexDirection: "column", alignItems: "stretch", gap: 8 }}>
