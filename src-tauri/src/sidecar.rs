@@ -25,13 +25,20 @@ pub fn spawn_sidecar(
     db_path: &str,
     token: &str,
 ) -> Result<SidecarHandle, String> {
-    let mut child = Command::new(node_cmd)
-        .arg(script_path)
+    let mut cmd = Command::new(node_cmd);
+    cmd.arg(script_path)
         .env("ISI_SIDECAR_TOKEN", token)
         .env("ISI_DB_PATH", db_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Windows: nao abrir janela de console para o processo Node.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("falha ao iniciar sidecar (node no PATH?): {e}"))?;
 

@@ -53,18 +53,23 @@ async function processAudio(mediaDir, buffer, filename) {
 
   try {
     // 1) Transcodifica para OGG/Opus (mono, 48k) — formato de nota de voz.
-    await execFileP(ffmpegPath, [
-      '-y', '-hide_banner', '-loglevel', 'error',
-      '-i', origPath,
-      '-c:a', 'libopus', '-b:a', '64k', '-ac', '1', '-ar', '48000',
-      oggPath,
-    ]);
+    // windowsHide: nao piscar janela de console do ffmpeg.
+    await execFileP(
+      ffmpegPath,
+      [
+        '-y', '-hide_banner', '-loglevel', 'error',
+        '-i', origPath,
+        '-c:a', 'libopus', '-b:a', '64k', '-ac', '1', '-ar', '48000',
+        oggPath,
+      ],
+      { windowsHide: true }
+    );
 
     // 2) Decodifica para PCM 8k mono (s16le) — base do waveform e da duracao.
     const { stdout: pcm } = await execFileP(
       ffmpegPath,
       ['-hide_banner', '-loglevel', 'error', '-i', origPath, '-ac', '1', '-ar', '8000', '-f', 's16le', '-'],
-      { encoding: 'buffer', maxBuffer: 200 * 1024 * 1024 }
+      { encoding: 'buffer', maxBuffer: 200 * 1024 * 1024, windowsHide: true }
     );
     const res = waveformFromPcm(pcm, 8000);
     waveform = res.waveform;

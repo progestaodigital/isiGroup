@@ -9,7 +9,8 @@ export type LicenseStatus =
   | "blocked"
   | "rate_limited"
   | "no_key"
-  | "network_error";
+  | "network_error"
+  | "loading";
 
 export interface LicenseState {
   status: LicenseStatus;

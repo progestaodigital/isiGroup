@@ -20,7 +20,15 @@ export default function App() {
     refresh();
   }, [refresh]);
 
-  if (loading || !license) {
+  // Enquanto o backend inicializa (HWID/sidecar/licença em segundo plano), o
+  // estado fica "loading" — fazemos polling curto até resolver.
+  useEffect(() => {
+    if (license?.status !== "loading") return;
+    const t = window.setInterval(refresh, 600);
+    return () => window.clearInterval(t);
+  }, [license?.status, refresh]);
+
+  if (loading || !license || license.status === "loading") {
     return (
       <div className="screen center">
         <div className="brand-mark">isigroup</div>

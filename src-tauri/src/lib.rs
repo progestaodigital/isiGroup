@@ -11,9 +11,10 @@ use sidecar::SidecarHandle;
 use std::sync::Mutex;
 use tauri::{Manager, State};
 
-/// Estado global do app, gerenciado pelo Tauri.
+/// Estado global do app, gerenciado pelo Tauri. Preenchido em segundo plano
+/// no arranque (HWID, sidecar, licenca) para a janela carregar imediatamente.
 struct AppState {
-    hwid: String,
+    hwid: Mutex<String>,
     sidecar: Mutex<Option<SidecarHandle>>,
     license: Mutex<LicenseState>,
 }
@@ -54,7 +55,7 @@ async fn submit_license_key(
         return Err("Formato invalido. Use ISI-XXXX-XXXX-XXXX-XXXX.".into());
     }
     license::store_key(&key)?;
-    let hwid = state.hwid.clone();
+    let hwid = state.hwid.lock().map_err(|_| "estado bloqueado")?.clone();
     let result = license::boot_ping(&key, &hwid).await;
     *state.license.lock().map_err(|_| "estado bloqueado")? = result.clone();
     Ok(result)
@@ -68,7 +69,7 @@ async fn revalidate_license(state: State<'_, AppState>) -> Result<LicenseState, 
         *state.license.lock().map_err(|_| "estado bloqueado")? = st.clone();
         return Ok(st);
     };
-    let hwid = state.hwid.clone();
+    let hwid = state.hwid.lock().map_err(|_| "estado bloqueado")?.clone();
     let result = license::boot_ping(&key, &hwid).await;
     *state.license.lock().map_err(|_| "estado bloqueado")? = result.clone();
     Ok(result)
@@ -86,7 +87,8 @@ fn clear_license(state: State<AppState>) -> Result<LicenseState, String> {
 /// HWID mascarado (debug/suporte) — nunca o valor inteiro.
 #[tauri::command]
 fn get_hwid_masked(state: State<AppState>) -> String {
-    hwid::mask_hwid(&state.hwid)
+    let h = state.hwid.lock().map(|g| g.clone()).unwrap_or_default();
+    hwid::mask_hwid(&h)
 }
 
 /// Versao atual do app (usada para checar atualizacoes no GitHub).
@@ -100,50 +102,32 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            // 1) HWID (uma vez, cacheado).
-            let hwid = hwid::compute_hwid();
-            eprintln!("[core] hwid {}", hwid::mask_hwid(&hwid));
-
-            // 2) Diretorio de dados do app + caminho do banco.
-            // strip_verbatim: em release esses caminhos vem com prefixo \\?\
-            // (verbatim), que quebra o Node. Removemos para usar C:\... normal.
-            let data_dir = strip_verbatim(
-                app.path()
-                    .app_data_dir()
-                    .map_err(|e| format!("sem app_data_dir: {e}"))?,
-            );
-            std::fs::create_dir_all(&data_dir).ok();
-            let db_path = data_dir.join("isigroup.db");
-
-            // 3) Token de sessao para a API local.
-            let token = gen_token();
-
-            // 4) Node + script do sidecar (dev: PATH + arvore; release: embarcado).
-            let (node_cmd, script) = resolve_sidecar(app)?;
-            eprintln!("[core] node: {node_cmd} | sidecar: {}", script.display());
-
-            // 5) Sobe o sidecar.
-            let handle = sidecar::spawn_sidecar(
-                &node_cmd,
-                &script.to_string_lossy(),
-                &db_path.to_string_lossy(),
-                &token,
-            )
-            .map_err(|e| format!("sidecar: {e}"))?;
-
-            // 6) Boot ping se ja houver chave salva.
-            let license_state = match license::load_key() {
-                Some(key) => {
-                    let h = hwid.clone();
-                    tauri::async_runtime::block_on(license::boot_ping(&key, &h))
-                }
-                None => LicenseState::no_key(),
-            };
-
+            // Estado inicial "carregando": a janela abre na hora e mostra a tela
+            // de loading enquanto a inicializacao pesada roda em segundo plano.
             app.manage(AppState {
-                hwid,
-                sidecar: Mutex::new(Some(handle)),
-                license: Mutex::new(license_state),
+                hwid: Mutex::new(String::new()),
+                sidecar: Mutex::new(None),
+                license: Mutex::new(LicenseState {
+                    status: "loading".into(),
+                    ..Default::default()
+                }),
+            });
+
+            // HWID + sidecar + boot ping fora da thread principal (nao trava a UI).
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                if let Err(e) = init_background(&handle) {
+                    eprintln!("[core] falha na inicializacao: {e}");
+                    if let Some(state) = handle.try_state::<AppState>() {
+                        if let Ok(mut lic) = state.license.lock() {
+                            *lic = LicenseState {
+                                status: "network_error".into(),
+                                message: Some(e),
+                                ..Default::default()
+                            };
+                        }
+                    }
+                }
             });
 
             Ok(())
@@ -191,10 +175,54 @@ fn gen_token() -> String {
     hex::encode(bytes)
 }
 
+/// Inicializacao pesada do arranque (em segundo plano): HWID, sidecar e boot ping.
+/// Ao terminar, preenche o AppState — a UI sai do estado "carregando".
+fn init_background(handle: &tauri::AppHandle) -> Result<(), String> {
+    let hwid = hwid::compute_hwid();
+    eprintln!("[core] hwid {}", hwid::mask_hwid(&hwid));
+
+    let data_dir = strip_verbatim(
+        handle
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("sem app_data_dir: {e}"))?,
+    );
+    std::fs::create_dir_all(&data_dir).ok();
+    let db_path = data_dir.join("isigroup.db");
+    let token = gen_token();
+
+    let (node_cmd, script) = resolve_sidecar(handle)?;
+    eprintln!("[core] node: {node_cmd} | sidecar: {}", script.display());
+    let sc = sidecar::spawn_sidecar(
+        &node_cmd,
+        &script.to_string_lossy(),
+        &db_path.to_string_lossy(),
+        &token,
+    )
+    .map_err(|e| format!("sidecar: {e}"))?;
+
+    let license_state = match license::load_key() {
+        Some(key) => tauri::async_runtime::block_on(license::boot_ping(&key, &hwid)),
+        None => LicenseState::no_key(),
+    };
+
+    let state = handle.state::<AppState>();
+    if let Ok(mut g) = state.hwid.lock() {
+        *g = hwid;
+    }
+    if let Ok(mut g) = state.sidecar.lock() {
+        *g = Some(sc);
+    }
+    if let Ok(mut g) = state.license.lock() {
+        *g = license_state;
+    }
+    Ok(())
+}
+
 /// Resolve o executavel Node e o script do sidecar.
 /// - Dev: usa o `node` do PATH e o `sidecar/index.mjs` da arvore do projeto.
 /// - Release: usa o Node embarcado e o sidecar copiados como recursos do app.
-fn resolve_sidecar(app: &tauri::App) -> Result<(String, std::path::PathBuf), String> {
+fn resolve_sidecar(app: &tauri::AppHandle) -> Result<(String, std::path::PathBuf), String> {
     if cfg!(debug_assertions) {
         let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")

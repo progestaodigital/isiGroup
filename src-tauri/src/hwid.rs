@@ -49,10 +49,14 @@ fn cim_value(class: &str, prop: &str) -> Option<String> {
         "$ErrorActionPreference='SilentlyContinue'; \
          (Get-CimInstance {class} | Select-Object -First 1 -ExpandProperty {prop})"
     );
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .ok()?;
+    let mut cmd = Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    // Windows: nao piscar janela de console ao consultar o hardware.
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = cmd.output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if s.is_empty() {
         None
