@@ -26,7 +26,7 @@
 | **2** 🟡 | Agendador de texto | Disparo único ✅ confirmado ao vivo. Recorrente semanal + editar/excluir + sequência ✅ implementados. **Recorrente semanal: verificação ao vivo ainda PENDENTE** (lógica testada em unitário). | 1 |
 | **3** ✅ | Mídia | Áudio PTT (waveform real), imagem, vídeo, enquete, link-preview, sequência multi-formato | 2 |
 | **4+5** ✅ | **Automações & Gatilhos** (unificado) | Gatilhos: entrou/saiu/mensagem(4 matches)/contém-link. Ações: msg no grupo, msg no privado, excluir, webhook (HMAC). **Validado ao vivo (webhook + DM + join/leave) em 2026-06-28.** | 1 |
-| **6** 🟡 | Hardening | Instalador NSIS + sidecar embarcado + ícone + arranque não-bloqueante + aviso de atualização ✅. Pacing anti-flood ✅. **Pendente:** auto-updater assinado (hoje é aviso de versão) e live runbook de licença (7 cenários). | 2–5 |
+| **6** 🟡 | Hardening | Instalador NSIS + sidecar embarcado + ícone + arranque não-bloqueante ✅. **Auto-updater nativo assinado (minisign) ✅.** Pacing anti-flood ✅. **Pendente:** live runbook de licença (7 cenários). | 2–5 |
 | **A–F** 🆕 | **Multi-chip (Pro)** — Milestone 2 | Vários chips por usuário, proxy por chip, disparo/automação group-first com cobertura e rotação | 1, 2, 4+5, 6 |
 
 > Fases 4 e 5 dependem só da Fase 1 (conexão), então podem ser paralelizadas depois do agendador, se houver banda.
@@ -67,9 +67,10 @@
 - [x] **UX do app instalado:** consoles escondidos (`CREATE_NO_WINDOW`/`windowsHide`), arranque **não-bloqueante** com tela "Iniciando…"
 - [x] **Logo isi** aplicado: ícone do app, **ícone do instalador** (`nsis.installerIcon`) e tela de início
 - [x] **Redesign visual "Obsidian & Lime"** (lime `#ccff00`, vidro/glassmorphism, Space Grotesk + JetBrains Mono, grid/glow)
-- [x] **Release v0.1.0 publicada**; **v0.1.1** com webhook enriquecido + logo/ícones + redesign + correções de UX
+- [x] **Auto-updater nativo assinado** (Tauri updater + minisign): a Visão geral baixa/instala a nova versão dentro do app e reinicia; manifesto `latest.json` no GitHub Releases; chave privada fora do repo
+- [x] **Releases v0.1.0 / v0.1.1 / v0.1.2 publicadas** (v0.1.2 = primeira com auto-update)
 
-**Pendências conhecidas:** verificação ao vivo do **recorrente semanal**; **auto-updater assinado** (hoje é aviso de versão); **live runbook de licença** (7 cenários); estabilidade de `community_announce` (sem comunidades no teste atual).
+**Pendências conhecidas:** verificação ao vivo do **recorrente semanal**; **live runbook de licença** (7 cenários); estabilidade de `community_announce` (sem comunidades no teste atual).
 
 > **Extra entregue:** `@all` (menção oculta / ping silencioso de todos os membros) no agendador — reversão consciente do "fora de escopo" original, a pedido do dono. ✅ confirmado ao vivo.
 
@@ -266,7 +267,7 @@ Join/leave geram webhook assinado HMAC com E.164, grupo e timestamp; entrega tem
 ### 6.3 Empacotamento e distribuição (questão em aberto #2)
 - [ ] **Estratégia de empacotamento do sidecar** (Node embarcado vs binário único — `pkg`/`nexe`/sea).
 - [ ] Instalador Tauri (Windows primeiro; macOS/Linux se aplicável).
-- [ ] **Updater** do Tauri configurado e assinado.
+- [x] **Updater** do Tauri configurado e assinado (minisign; endpoint `latest.json` no GitHub Releases). ✅
 
 ### 6.4 Compliance final
 - [ ] Avisos de risco (Baileys não-oficial; recomendar **número secundário**).
