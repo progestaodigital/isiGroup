@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const API_BASE: &str = "https://api.isitools.com.br";
+const DEFAULT_API_BASE: &str = "https://api.isitools.com.br";
 const KEYRING_SERVICE: &str = "isigroup";
 const KEYRING_USER: &str = "license_key";
 
@@ -18,7 +18,7 @@ const PRODUCTS: &[(&str, &str)] = &[("isigroup-pro", "pro"), ("isigroup", "free"
 /// contrato mais condicoes locais (`no_key`, `network_error`).
 #[derive(Serialize, Clone, Default)]
 pub struct LicenseState {
-    pub status: String, // valid|invalid|hwid_mismatch|expired|blocked|rate_limited|no_key|network_error
+    pub status: String, // valid|invalid|hwid_mismatch|expired|blocked|rate_limited|no_key|network_error|clock_error
     pub has_key: bool,
     pub edition: String,             // "free" | "pro" | "" (desconhecido)
     pub product_slug: Option<String>,
@@ -57,10 +57,31 @@ struct ValidateResponse {
     support_url: Option<String>,
     hwid_bound: Option<bool>,
     retry_after_s: Option<u64>,
+    // JWT EdDSA opcional, presente so quando status == "valid". Quando vem, e a
+    // unica fonte de verdade do gating (ver entitlement.rs). Ausente => fallback.
+    entitlement: Option<String>,
 }
 
 /// Valida o formato ISI-XXXX-XXXX-XXXX-XXXX com alfabeto [2-9A-HJ-NP-Z].
 /// Espelha LICENSE_KEY_RE do painel. Servidor continua sendo a autoridade.
+/// Base da API de licenca. Em RELEASE e sempre producao — a env e ignorada para
+/// que o binario distribuido nao possa ser apontado para outro painel. Em builds
+/// de DESENVOLVIMENTO (debug), `ISI_LICENSE_API_BASE` permite testar contra o
+/// painel DEV (ex.: http://localhost:3000). Producao nunca seta essa env.
+fn api_base() -> String {
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(base) = std::env::var("ISI_LICENSE_API_BASE") {
+            let base = base.trim().trim_end_matches('/');
+            if !base.is_empty() {
+                eprintln!("[license] API base sobreposta (dev): {base}");
+                return base.to_string();
+            }
+        }
+    }
+    DEFAULT_API_BASE.to_string()
+}
+
 pub fn valid_key_format(key: &str) -> bool {
     let parts: Vec<&str> = key.split('-').collect();
     if parts.len() != 5 || parts[0] != "ISI" {
@@ -116,9 +137,8 @@ pub async fn boot_ping(key: &str, hwid: &str) -> LicenseState {
         ..Default::default()
     };
     for (slug, edition) in PRODUCTS {
-        let mut st = validate_one(key, hwid, slug).await;
-        st.edition = edition.to_string();
-        st.product_slug = Some(slug.to_string());
+        // validate_one ja preenche product_slug e edition (incl. override pelo token).
+        let st = validate_one(key, hwid, slug, edition).await;
         match st.status.as_str() {
             "rate_limited" | "network_error" => return st,
             "invalid" => last = st,
@@ -128,10 +148,17 @@ pub async fn boot_ping(key: &str, hwid: &str) -> LicenseState {
     last
 }
 
-/// Valida a licenca contra UM produto especifico.
-async fn validate_one(key: &str, hwid: &str, product_slug: &str) -> LicenseState {
+/// Valida a licenca contra UM produto especifico. `expected_edition` e a edicao
+/// interna (free|pro) daquele slug, usada como fallback (sem token) e como
+/// referencia para detectar anomalia de tier no token.
+async fn validate_one(
+    key: &str,
+    hwid: &str,
+    product_slug: &str,
+    expected_edition: &str,
+) -> LicenseState {
     let now = unix_now();
-    let url = format!("{API_BASE}/v1/license/validate");
+    let url = format!("{}/v1/license/validate", api_base());
     let body = serde_json::json!({
         "license_key": key,
         "hwid": hwid,
@@ -156,6 +183,9 @@ async fn validate_one(key: &str, hwid: &str, product_slug: &str) -> LicenseState
                     let mut st = LicenseState {
                         status: v.status,
                         has_key: true,
+                        // Edicao/slug default (fallback): valem quando nao ha token assinado.
+                        edition: expected_edition.to_string(),
+                        product_slug: Some(product_slug.to_string()),
                         expires_at: v.expires_at,
                         grace_until: v.grace_until,
                         subscription_url: v.subscription_url,
@@ -164,11 +194,16 @@ async fn validate_one(key: &str, hwid: &str, product_slug: &str) -> LicenseState
                         hwid_bound: v.hwid_bound,
                         message: None,
                         checked_at_unix: Some(now),
-                        ..Default::default()
                     };
                     // rate_limited vem como HTTP 429 (corpo pode ou nao trazer status).
                     if http == 429 {
                         st.status = "rate_limited".into();
+                        return st;
+                    }
+                    // Entitlement assinado: so existe em estado `valid`. Presente => e a
+                    // unica fonte de verdade do gating; ausente => fallback (JSON de hoje).
+                    if st.status == "valid" {
+                        st = apply_entitlement(st, &v.entitlement, hwid, product_slug, expected_edition, now);
                     }
                     eprintln!("[license] estado: {}", st.status);
                     st
@@ -177,6 +212,68 @@ async fn validate_one(key: &str, hwid: &str, product_slug: &str) -> LicenseState
             }
         }
         Err(e) => network_error(format!("sem conexao com o painel: {e}"), now),
+    }
+}
+
+/// Aplica a politica de entitlement sobre um estado ja `valid` do JSON.
+/// - token AUSENTE/vazio => fallback: mantem o estado (confia no JSON como hoje).
+/// - token PRESENTE => confia SO no token assinado:
+///     * Reject::Tamper (assinatura/claims invalidos, MITM) => nega (status invalid).
+///     * Reject::Clock (relogio local errado) => clock_error (estado proprio):
+///       re-pingar nao conserta um relogio errado, entao a UI orienta o usuario
+///       a ajustar a data/hora em vez de entrar em loop de retry.
+///     * OK => concede a edicao do token; se divergir do esperado para o slug,
+///       loga anomalia e NAO concede tier acima.
+fn apply_entitlement(
+    mut st: LicenseState,
+    token: &Option<String>,
+    hwid: &str,
+    product_slug: &str,
+    expected_edition: &str,
+    now: u64,
+) -> LicenseState {
+    let Some(token) = token.as_deref().filter(|t| !t.is_empty()) else {
+        eprintln!("[license] sem entitlement no corpo — fallback (confia no JSON)");
+        return st;
+    };
+    match crate::entitlement::verify(token, hwid, product_slug, now) {
+        Ok(claims) => {
+            st.edition = match crate::entitlement::edition_for_claim(&claims.edition) {
+                Some(ed) if ed == expected_edition => ed.to_string(),
+                Some(ed) => {
+                    eprintln!(
+                        "[license] anomalia: edicao do token '{}' (={ed}) diverge do esperado '{expected_edition}' (slug {product_slug}); nao concedendo tier acima",
+                        claims.edition
+                    );
+                    "free".into()
+                }
+                None => {
+                    eprintln!("[license] anomalia: edicao desconhecida no token '{}'", claims.edition);
+                    "free".into()
+                }
+            };
+            eprintln!("[license] entitlement OK (kid valido, edicao {})", st.edition);
+            st
+        }
+        Err(crate::entitlement::Reject::Clock(msg)) => {
+            // Relogio local errado: estado proprio. Re-pingar NAO conserta (o token
+            // novo vem com iat/exp de servidor e falha igual) — entao nao reaproveita
+            // network_error (que tem retry/backoff e viraria loop). A UI orienta o
+            // usuario a ajustar a data/hora; o "tentar novamente" e uma unica acao manual.
+            eprintln!("[license] entitlement rejeitado (relogio): {msg}");
+            st.status = "clock_error".into();
+            st.edition = "free".into();
+            st.message = Some("relogio do sistema incorreto".into());
+            st
+        }
+        Err(crate::entitlement::Reject::Tamper(msg)) => {
+            // Assinatura/claims invalidos => possivel adulteracao/MITM. Nao conceder.
+            eprintln!("[license] entitlement rejeitado (adulteracao): {msg}");
+            st.status = "invalid".into();
+            st.edition = "free".into();
+            st.message = Some("falha na verificacao da licenca (assinatura)".into());
+            st
+        }
     }
 }
 
