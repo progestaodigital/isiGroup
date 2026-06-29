@@ -213,8 +213,8 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
 
   const multiChip = isPro && accounts.length >= 2;
 
-  // Na edição padrão, grupos onde a conta não é admin não são exibidos.
-  const visibleTargets = useMemo(() => (isPro ? targets : targets.filter((t) => t.is_admin)), [targets, isPro]);
+  // Agendamento é liberado em todos os grupos (admin ou só membro) em qualquer edição.
+  const visibleTargets = targets;
   // Group-first: lista de grupos DISTINTOS (um chip pode ver o mesmo grupo).
   const groups = useMemo(() => {
     const seen = new Map<string, Target>();
@@ -398,12 +398,12 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
             {groups.map((t) => (
               <label key={t.id} className="pick">
                 <input type="checkbox" checked={selected.has(t.id)} onChange={() => toggle(t.id)} />
-                <span>{t.name}{isPro && !multiChip && !t.is_admin && <span className="muted small"> (membro)</span>}</span>
+                <span>{t.name}{!multiChip && !t.is_admin && <span className="muted small"> (membro)</span>}</span>
               </label>
             ))}
           </div>
         )}
-        {isPro && !multiChip && (
+        {!multiChip && (
           <span className="hint">Em grupos onde só admins enviam, mensagens de membro podem falhar.</span>
         )}
       </div>
