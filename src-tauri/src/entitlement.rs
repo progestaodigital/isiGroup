@@ -30,19 +30,20 @@ use serde::Deserialize;
 // emite token => o app cai no fallback (JSON), que e seguro. Durante a rotacao,
 // manter a pubkey antiga e a nova validas (~4h) ate o ultimo token antigo expirar.
 
-// PRODUCAO — adicionar o par (kid, pubkey base64url) quando a chave for gerada.
-// Em release este e o UNICO conjunto de chaves confiaveis.
+// PRODUCAO — em release este e o UNICO conjunto de chaves confiaveis. A chave
+// DEV NUNCA entra aqui.
 #[cfg(not(debug_assertions))]
 const TRUSTED_KEYS: &[(&str, &str)] = &[
-    // ("isi-ed25519-prod-XXXX", "<PUBKEY_BASE64URL_PRODUCAO>"),
+    ("isi-ed25519-prod-2026-06", "YoNbolc1ExyQJlXY2opb5RG7qxNLz5yqX45Gt-x0ZjE"),
 ];
 
-// DESENVOLVIMENTO — chave DEV + (futuramente) a de producao, para testar a
-// coexistencia/rotacao. NUNCA entra no binario de release.
+// DESENVOLVIMENTO — chave DEV + a de PRODUCAO (para um build debug tambem poder
+// verificar tokens de producao e exercitar a coexistencia/rotacao). NUNCA entra
+// no binario de release.
 #[cfg(debug_assertions)]
 const TRUSTED_KEYS: &[(&str, &str)] = &[
     ("isi-ed25519-2026-06", "uJNVaOJjkbyJwluIk7n46kbkzUvkr9zgFa0xEuHiCns"),
-    // ("isi-ed25519-prod-XXXX", "<PUBKEY_BASE64URL_PRODUCAO>"),
+    ("isi-ed25519-prod-2026-06", "YoNbolc1ExyQJlXY2opb5RG7qxNLz5yqX45Gt-x0ZjE"),
 ];
 
 const ISSUER: &str = "isipanel";
@@ -247,6 +248,39 @@ mod tests {
             .expect("token DEV pro deve validar contra a pubkey embarcada");
         assert_eq!(claims.product_slug, "isigroup-pro");
         assert_eq!(edition_for_claim(&claims.edition), Some("pro"));
+    }
+
+    // Token REAL do painel de PRODUCAO (kid isi-ed25519-prod-2026-06), assinado com
+    // a privada que casa com a pubkey de producao embarcada. hwid de amostra (ffff…).
+    const PROD_TOKEN: &str = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6ImlzaS1lZDI1NTE5LXByb2QtMjAyNi0wNiJ9.eyJwcm9kdWN0X3NsdWciOiJpc2lncm91cCIsImVkaXRpb24iOiJpbmljaWFudGUiLCJzdGF0dXMiOiJ2YWxpZCIsImh3aWQiOiJpc2lncm91cC12MTpmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmIiwibm9uY2UiOiJkODFmMmE5ZS00NzBkLTRiZWEtOGMyMC1iZDEzYzQwMGIyYzQiLCJzdWIiOiI2MjE3YWMwZC0xM2NkLTQ4ZTctOTg1Yi1mMThjNmZlZTEzN2UiLCJpc3MiOiJpc2lwYW5lbCIsImlhdCI6MTc4Mjc1Nzg4OSwiZXhwIjoxNzgyNzcyMjg5fQ.DzIAQ7h8_VT0JnVe1AC8j4GMR9VBHgCVzUPDRKtoqIBfv_WIq_AmRMCDfJgeZ8N-Wru3NhcZdTXcTZMr88nUDw";
+
+    #[test]
+    fn prod_panel_token_pairs_with_embedded_key() {
+        let c = peek(PROD_TOKEN);
+        let hwid = c["hwid"].as_str().unwrap();
+        let slug = c["product_slug"].as_str().unwrap();
+        let now = c["iat"].as_u64().unwrap() + 60;
+        let claims = verify(PROD_TOKEN, hwid, slug, now)
+            .expect("token PROD deve validar contra a pubkey de producao embarcada");
+        assert_eq!(claims.product_slug, "isigroup");
+        assert_eq!(edition_for_claim(&claims.edition), Some("free"));
+    }
+
+    #[test]
+    fn prod_panel_token_rejected_under_wrong_key() {
+        // Byte-flip na assinatura => a pubkey de producao rejeita (prova negativa).
+        let mut parts: Vec<&str> = PROD_TOKEN.split('.').collect();
+        let mut sig = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
+        sig[0] ^= 0x01;
+        let bad_sig = URL_SAFE_NO_PAD.encode(&sig);
+        parts[2] = &bad_sig;
+        let forged = parts.join(".");
+        let c = peek(PROD_TOKEN);
+        let now = c["iat"].as_u64().unwrap() + 60;
+        assert!(matches!(
+            verify(&forged, c["hwid"].as_str().unwrap(), "isigroup", now),
+            Err(Reject::Tamper(_))
+        ));
     }
 
     #[test]
