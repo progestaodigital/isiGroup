@@ -42,6 +42,14 @@ const COPY: Record<string, { title: string; body: string }> = {
     title: "Sem conexão",
     body: "Não foi possível falar com o painel. Verifique a internet e tente de novo.",
   },
+  server_error: {
+    title: "Painel indisponível",
+    body: "O servidor de licenças respondeu de forma inesperada. Tente de novo em instantes; se persistir, fale com o suporte.",
+  },
+  clock_error: {
+    title: "Relógio do computador incorreto",
+    body: "A data/hora do seu sistema está fora do esperado, o que impede a validação. Ajuste o relógio do Windows (data, hora e fuso) e abra o app novamente.",
+  },
 };
 
 export function LicenseGate({ license, onChange }: Props) {
@@ -127,10 +135,14 @@ export function LicenseGate({ license, onChange }: Props) {
               </button>
             )}
           {(license.status === "network_error" ||
+            license.status === "server_error" ||
             license.status === "rate_limited" ||
             license.status === "expired" ||
             license.status === "blocked" ||
-            license.status === "hwid_mismatch") && (
+            license.status === "hwid_mismatch" ||
+            // clock_error: uma re-tentativa MANUAL (sem loop). Se o relogio segue
+            // errado, o re-ping volta a clock_error e a mensagem reaparece.
+            license.status === "clock_error") && (
             <button className="link" onClick={retry} disabled={busy}>
               Tentar novamente
             </button>

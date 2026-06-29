@@ -10,6 +10,8 @@ export type LicenseStatus =
   | "rate_limited"
   | "no_key"
   | "network_error"
+  | "server_error"
+  | "clock_error"
   | "loading";
 
 export interface LicenseState {

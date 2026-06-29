@@ -1,6 +1,7 @@
 // isigroup — core Rust (Fase 0)
 // Responsabilidades: ciclo de vida do sidecar, HWID, keyring, boot ping de licenca.
 
+mod entitlement;
 mod hwid;
 mod license;
 mod sidecar;

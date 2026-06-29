@@ -30,4 +30,6 @@ keyring = { version = "3", features = ["windows-native", "apple-native", "linux-
 sha2 = "0.10"
 hex = "0.4"
 rand = "0.8"
+ed25519-dalek = "2"   # verificacao do entitlement (JWT EdDSA); aceita pubkey raw 32 bytes
+base64 = "0.22"       # base64url (URL_SAFE_NO_PAD) p/ header/payload/sig e campo x
 
