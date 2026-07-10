@@ -440,6 +440,39 @@ button.link.danger { color: var(--danger); }
 .pick { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
 .pick input { accent-color: var(--accent); }
 .pick.locked { opacity: 0.5; cursor: not-allowed; }
+
+/* Ferramentas do picker de grupos: busca, selecionar todos, seleções salvas */
+.picker-tools { display: flex; gap: 10px; align-items: center; }
+.picker-tools input { flex: 1; padding: 9px 12px; font-size: 13px; }
+.picker-tools button.link { white-space: nowrap; }
+.selections { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.selections input.sel-filter { padding: 8px 12px; font-size: 12px; max-width: 320px; }
+.selection-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.selection-chip {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--input-bg);
+}
+.selection-chip button {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  color: var(--text);
+  font-size: 12px;
+  padding: 6px 10px;
+}
+.selection-chip button:hover:not(:disabled) {
+  transform: none;
+  box-shadow: none;
+  background: var(--bg-elev2);
+  color: var(--accent);
+}
+.selection-chip .chip-del { color: var(--muted); padding: 6px 8px; border-left: 1px solid var(--border); }
+.selection-chip .chip-del:hover:not(:disabled) { color: var(--danger); background: var(--bg-elev2); }
 .per-target { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 
 .recur-row { display: flex; gap: 10px; align-items: center; }

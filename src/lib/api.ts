@@ -240,6 +240,25 @@ export const syncTargets = () =>
 export const listTargets = () =>
   sidecar<{ targets: Target[] }>("/targets");
 
+// Seleções de grupos salvas (picker do agendador)
+export interface GroupSelection {
+  id: number;
+  name: string;
+  jids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export const listSelections = () =>
+  sidecar<{ selections: GroupSelection[] }>("/selections");
+export const saveSelection = (name: string, jids: string[]) =>
+  sidecar<{ id?: number; error?: string; message?: string }>("/selections", {
+    method: "POST",
+    ...jbody({ name, jids }),
+  });
+export const deleteSelection = (id: number) =>
+  sidecar<{ ok?: boolean }>(`/selections/${id}`, { method: "DELETE" });
+
 // Agendamentos
 export type ScheduleStatus =
   | "pending"

@@ -16,6 +16,7 @@ import {
   rescheduleSchedule,
 } from "../lib/api";
 import { StepDraft, newStep, stepDraftToApi, StepSequenceEditor } from "./StepEditor";
+import { GroupPicker } from "./GroupPicker";
 import { usePager, Pager } from "./Pager";
 
 const STATUS: Record<string, { label: string; cls: string }> = {
@@ -235,9 +236,6 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
       .catch(() => {});
   }, [multiChip, selectedTargets, selectedChips]);
 
-  function toggle(id: number) {
-    setSelected((prev) => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
-  }
   function toggleChip(id: number) {
     setSelectedChips((prev) => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
   }
@@ -394,14 +392,7 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
         {groups.length === 0 ? (
           <p className="muted small">Nenhum grupo disponível. Sincronize em "Grupos & Comunidades".</p>
         ) : (
-          <div className="picker">
-            {groups.map((t) => (
-              <label key={t.id} className="pick">
-                <input type="checkbox" checked={selected.has(t.id)} onChange={() => toggle(t.id)} />
-                <span>{t.name}{!multiChip && !t.is_admin && <span className="muted small"> (membro)</span>}</span>
-              </label>
-            ))}
-          </div>
+          <GroupPicker groups={groups} selected={selected} onChange={setSelected} showMemberTag={!multiChip} />
         )}
         {!multiChip && (
           <span className="hint">Em grupos onde só admins enviam, mensagens de membro podem falhar.</span>

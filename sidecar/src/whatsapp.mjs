@@ -73,6 +73,30 @@ export function createWhatsApp(db, sessionRootDir) {
   }
   const primary = () => getSession(primaryId());
 
+  // Sincroniza TODOS os chips conectados (botao "Sincronizar agora" da UI —
+  // a lista de alvos mistura os chips, entao a sync tambem precisa abranger todos).
+  // Com 1 chip o comportamento e identico ao legado.
+  async function syncAllTargets() {
+    const ids = [...sessions.entries()]
+      .filter(([, s]) => s.isConnected())
+      .map(([id]) => id);
+    if (ids.length === 0) throw new Error('WhatsApp nao conectado');
+    const total = { synced: 0, admin: 0, communities: 0, accounts: [] };
+    for (const id of ids) {
+      try {
+        const r = await getSession(id).syncTargets();
+        total.synced += r.synced;
+        total.admin += r.admin;
+        total.communities += r.communities;
+        total.accounts.push({ account_id: id, ...r });
+      } catch (e) {
+        console.error(`[wa] sync da conta ${id} falhou: ${e?.message}`);
+        total.accounts.push({ account_id: id, error: e?.message ?? 'erro' });
+      }
+    }
+    return total;
+  }
+
   // Reconecta no arranque todas as contas com credenciais salvas.
   function bootReconnect() {
     const accts = db.prepare('SELECT id FROM accounts ORDER BY id').all();
@@ -163,6 +187,7 @@ export function createWhatsApp(db, sessionRootDir) {
     logoutAccount: (id) => getSession(id).logout(),
     getAccountState: (id) => getSession(id).getState(),
     syncTargetsForAccount: (id) => getSession(id).syncTargets(),
+    syncAllTargets,
     isAccountConnected: (id) => getSession(id).isConnected(),
     accountSend: (id, jid, content) => getSession(id).sendContent(jid, content),
     accountReplyText: (id, jid, text, q) => getSession(id).replyText(jid, text, q),
@@ -204,6 +229,10 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
   // Caches para enriquecer os webhooks: nome (pushName/contatos) e telefone por id.
   const nameById = new Map();
   const phoneById = new Map();
+  // Nomes de grupo vindos do chat list (history sync / chats.upsert / groups.update).
+  // Fallback do sync: alguns grupos vem com subject vazio na metadata query
+  // (quirk pos-migracao @lid), mas o chat list traz o nome que o usuario ve no app.
+  const groupNameById = new Map();
 
   const state = {
     status: 'disconnected', // disconnected | connecting | qr | connected
@@ -279,7 +308,28 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
       };
       sock.ev.on('contacts.upsert', cacheContacts);
       sock.ev.on('contacts.update', cacheContacts);
-      sock.ev.on('messaging-history.set', (h) => cacheContacts(h?.contacts));
+
+      // Nomes de grupo do chat list — fallback para subject vazio na metadata.
+      const cacheGroupChats = (chats) => {
+        for (const c of chats ?? []) {
+          const nm = (c.name ?? '').trim();
+          if (c.id?.endsWith('@g.us') && nm) groupNameById.set(c.id, nm);
+        }
+      };
+      const cacheGroupMeta = (groups) => {
+        for (const g of groups ?? []) {
+          const nm = (g.subject ?? '').trim();
+          if (g.id?.endsWith('@g.us') && nm) groupNameById.set(g.id, nm);
+        }
+      };
+      sock.ev.on('chats.upsert', cacheGroupChats);
+      sock.ev.on('chats.update', cacheGroupChats);
+      sock.ev.on('groups.upsert', cacheGroupMeta);
+      sock.ev.on('groups.update', cacheGroupMeta);
+      sock.ev.on('messaging-history.set', (h) => {
+        cacheContacts(h?.contacts);
+        cacheGroupChats(h?.chats);
+      });
 
       // Entrada/saida de membros (gatilhos 'join'/'leave').
       sock.ev.on('group-participants.update', (ev) => {
@@ -395,6 +445,18 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
     const meta = await sock.groupFetchAllParticipating();
     const now = new Date().toISOString();
 
+    // Nomes ja conhecidos (qualquer chip): se o WhatsApp nao devolver o subject
+    // nesta sync (metadata parcial / rate limit), preservamos o nome anterior
+    // em vez de rebaixar para "(sem nome)". Prefere o nome do proprio chip.
+    const knownNames = new Map();
+    for (const r of db
+      .prepare("SELECT account_id, jid, name FROM targets WHERE name <> '' AND name <> '(sem nome)'")
+      .all()) {
+      if (!knownNames.has(r.jid) || r.account_id === accountId) knownNames.set(r.jid, r.name);
+    }
+
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
     const debug = [];
     const rows = [];
     for (const g of Object.values(meta)) {
@@ -404,14 +466,35 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
 
       let name = (g.subject ?? '').trim();
       let nameSource = 'batch';
+      if (!name && (g.notify ?? '').trim()) {
+        // `notify` = nome de exibicao do chat — presente em grupos sem subject definido.
+        name = g.notify.trim();
+        nameSource = 'notify';
+      }
+      if (!name && groupNameById.has(g.id)) {
+        // Nome visto no chat list (history sync / chats.upsert) — o que o usuario ve no app.
+        name = groupNameById.get(g.id);
+        nameSource = 'chat-cache';
+      }
       if (!name) {
-        try {
-          const full = await sock.groupMetadata(g.id);
-          name = (full?.subject ?? '').trim();
-          nameSource = 'metadata';
-        } catch (e) {
-          console.error(`[wa:${accountId}] groupMetadata falhou para ${g.id}: ${e?.message}`);
+        // groupMetadata individual falha com rate-overlimit em rajada; retry com pausa.
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            const full = await sock.groupMetadata(g.id);
+            name = (full?.subject ?? '').trim();
+            if (name) nameSource = 'metadata';
+            break; // chamada ok: retry so ajuda em erro (rate limit)
+          } catch (e) {
+            console.error(
+              `[wa:${accountId}] groupMetadata falhou para ${g.id} (tentativa ${attempt}): ${e?.message}`
+            );
+            if (attempt < 3) await sleep(600 * attempt);
+          }
         }
+      }
+      if (!name && knownNames.has(g.id)) {
+        name = knownNames.get(g.id);
+        nameSource = 'previous';
       }
       if (!name) {
         name = '(sem nome)';
@@ -419,6 +502,7 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
       }
 
       debug.push({
+        jid: g.id,
         name,
         name_source: nameSource,
         type: classifyTarget(g),
@@ -427,6 +511,21 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
         self_raw: mine ? maskId(mine.id ?? mine.jid ?? mine.lid) : null,
         domains: [...new Set(participants.map((p) => domainOf(p.id ?? p.jid ?? p.lid)))],
         ...pickCommunityFlags(g),
+        // Sem nome em nenhuma fonte: despeja os campos crus para diagnostico.
+        ...(nameSource === 'fallback'
+          ? {
+              raw: {
+                subject: g.subject ?? null,
+                notify: g.notify ?? null,
+                desc: g.desc ?? null,
+                subjectOwner: g.subjectOwner ?? null,
+                subjectTime: g.subjectTime ?? null,
+                creation: g.creation ?? null,
+                size: g.size ?? null,
+                keys: Object.keys(g),
+              },
+            }
+          : {}),
       });
 
       rows.push({

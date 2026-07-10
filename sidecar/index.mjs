@@ -223,7 +223,8 @@ async function route(req, res, url) {
   // --- Alvos (grupos/comunidades) ---
   if (match('POST', '/targets/sync')) {
     try {
-      const result = await wa.syncTargets();
+      // Sincroniza todos os chips conectados — a lista de alvos mistura os chips.
+      const result = await wa.syncAllTargets();
       return json(res, 200, result);
     } catch (err) {
       return json(res, 409, { error: 'not_connected', message: err.message });
@@ -231,6 +232,44 @@ async function route(req, res, url) {
   }
   if (match('GET', '/targets')) {
     return json(res, 200, { targets: wa.listTargets() });
+  }
+
+  // --- Selecoes de grupos salvas (picker do agendador) ---
+  if (match('GET', '/selections')) {
+    const rows = db
+      .prepare('SELECT id, name, jids_json, created_at, updated_at FROM group_selections ORDER BY name COLLATE NOCASE')
+      .all()
+      .map((r) => ({
+        id: r.id,
+        name: r.name,
+        jids: JSON.parse(r.jids_json),
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+      }));
+    return json(res, 200, { selections: rows });
+  }
+  if (match('POST', '/selections')) {
+    const b = await readJson(req);
+    const name = String(b?.name ?? '').trim().slice(0, 80);
+    const jids = Array.isArray(b?.jids) ? [...new Set(b.jids.map(String))] : [];
+    if (!name) return json(res, 400, { error: 'bad_request', message: 'informe um nome para a selecao' });
+    if (jids.length === 0) return json(res, 400, { error: 'bad_request', message: 'selecione ao menos um grupo' });
+    const now = new Date().toISOString();
+    // Mesmo nome = atualiza a selecao existente (upsert).
+    const r = db
+      .prepare(`
+        INSERT INTO group_selections (name, jids_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET jids_json = excluded.jids_json, updated_at = excluded.updated_at
+      `)
+      .run(name, JSON.stringify(jids), now, now);
+    const row = db.prepare('SELECT id FROM group_selections WHERE name = ?').get(name);
+    return json(res, r.changes && r.lastInsertRowid === row.id ? 201 : 200, { id: row.id });
+  }
+  const selDel = path.match(/^\/selections\/(\d+)$/);
+  if (method === 'DELETE' && selDel) {
+    db.prepare('DELETE FROM group_selections WHERE id = ?').run(Number(selDel[1]));
+    return json(res, 200, { ok: true });
   }
 
   // --- Upload de midia (corpo binario) ---
