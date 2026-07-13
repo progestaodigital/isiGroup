@@ -3,11 +3,8 @@ import { check, Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import {
   LicenseState,
-  SidecarHealth,
   clearLicense,
-  fetchSidecarHealth,
   getAppVersion,
-  getHwidMasked,
   setSidecarEdition,
 } from "../lib/api";
 import { ConnectionsView } from "./ConnectionsView";
@@ -111,15 +108,6 @@ function Overview({
   license: LicenseState;
   onGo: (v: View) => void;
 }) {
-  const [health, setHealth] = useState<SidecarHealth | null>(null);
-  const [hwid, setHwid] = useState("");
-  const [healthErr, setHealthErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetchSidecarHealth().then(setHealth).catch((e) => setHealthErr(String(e)));
-    getHwidMasked().then(setHwid).catch(() => {});
-  }, []);
-
   return (
     <div>
       <h1>Visão geral</h1>
@@ -129,22 +117,6 @@ function Overview({
 
       <div className="grid">
         <section className="card status">
-          <h2>Sidecar</h2>
-          {health ? (
-            <ul className="kv">
-              <li><span>Status</span><b className="ok">● online</b></li>
-              <li><span>Serviço</span><b>{health.service} v{health.version}</b></li>
-              <li><span>Migrations</span><b>{health.migrations_applied}</b></li>
-              <li><span>Uptime</span><b>{health.uptime_s}s</b></li>
-            </ul>
-          ) : healthErr ? (
-            <p className="error">offline — {healthErr}</p>
-          ) : (
-            <p className="muted">consultando…</p>
-          )}
-        </section>
-
-        <section className="card status">
           <h2>Licença</h2>
           <ul className="kv">
             <li><span>Estado</span><b className="ok">● válida</b></li>
@@ -152,7 +124,6 @@ function Overview({
             {license.expires_at && (
               <li><span>Expira</span><b>{license.expires_at}</b></li>
             )}
-            <li><span>HWID</span><b className="mono">{hwid || "—"}</b></li>
           </ul>
         </section>
 

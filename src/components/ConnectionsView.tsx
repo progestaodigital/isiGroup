@@ -119,11 +119,10 @@ export function ConnectionsView({
       </p>
 
       <div className="grid">
-        {accounts.map((a, i) => (
+        {accounts.map((a) => (
           <ChipCard
             key={a.id}
             account={a}
-            isPrimary={i === 0}
             isPro={isPro}
             busy={busy === a.id}
             onConnect={() => connect(a.id)}
@@ -163,7 +162,6 @@ export function ConnectionsView({
 
 function ChipCard({
   account,
-  isPrimary,
   isPro,
   busy,
   onConnect,
@@ -171,7 +169,6 @@ function ChipCard({
   onRemove,
 }: {
   account: Account;
-  isPrimary: boolean;
   isPro: boolean;
   busy: boolean;
   onConnect: () => void;
@@ -264,9 +261,15 @@ function ChipCard({
         {isPro && (
           <button className="link subtle" onClick={() => setShowProxy((v) => !v)}>Proxy</button>
         )}
-        {isPro && !isPrimary && (
-          <button className="link danger" onClick={onRemove} disabled={busy}>Remover</button>
-        )}
+        <button
+          className="link danger"
+          onClick={() => {
+            if (confirm(`Remover a conexão "${account.label}"? O pareamento e os grupos sincronizados deste chip serão apagados.`)) onRemove();
+          }}
+          disabled={busy}
+        >
+          Remover
+        </button>
       </div>
       {syncMsg && <p className="hint">{syncMsg}</p>}
 

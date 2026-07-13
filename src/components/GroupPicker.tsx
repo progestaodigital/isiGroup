@@ -101,7 +101,7 @@ export function GroupPicker({
   async function remove(sel: GroupSelection) {
     if (!confirm(`Apagar a seleção "${sel.name}"?`)) return;
     await deleteSelection(sel.id);
-    setNote(null);
+    setNote(`Seleção "${sel.name}" apagada.`);
     refreshSelections();
   }
 
@@ -137,6 +137,7 @@ export function GroupPicker({
       </div>
 
       <div className="selections">
+        <span className="mini-label">Seleções salvas</span>
         <div className="picker-tools">
           <input
             value={saveName}
@@ -153,7 +154,12 @@ export function GroupPicker({
             {saving ? "Salvando…" : "Salvar seleção"}
           </button>
         </div>
-        {selections.length > 0 && (
+        {selections.length === 0 ? (
+          <span className="muted small">
+            Nenhuma seleção salva. Marque os grupos acima, dê um nome e clique em "Salvar seleção" para
+            reutilizar nos próximos agendamentos.
+          </span>
+        ) : (
           <>
             <input
               type="search"

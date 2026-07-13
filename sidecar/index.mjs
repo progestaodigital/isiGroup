@@ -201,12 +201,7 @@ async function route(req, res, url) {
   }
   const acctDel = path.match(/^\/accounts\/(\d+)$/);
   if (method === 'DELETE' && acctDel) {
-    const id = Number(acctDel[1]);
-    const primary = db.prepare('SELECT id FROM accounts ORDER BY id LIMIT 1').get();
-    if (primary && id === primary.id) {
-      return json(res, 409, { error: 'cannot_remove_primary', message: 'A conta principal nao pode ser removida.' });
-    }
-    await wa.removeAccount(id);
+    await wa.removeAccount(Number(acctDel[1]));
     return json(res, 200, { ok: true });
   }
 

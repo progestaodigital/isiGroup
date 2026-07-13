@@ -159,6 +159,8 @@ export function createWhatsApp(db, sessionRootDir) {
       db.exec('ROLLBACK;');
       throw e;
     }
+    // O pool nunca fica sem conta: o fluxo 1-chip depende de uma primária existir.
+    ensurePrimaryAccount(db);
   }
 
   function setAccountProxy(accountId, proxyUrl, enabled) {

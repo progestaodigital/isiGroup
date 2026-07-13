@@ -445,7 +445,8 @@ button.link.danger { color: var(--danger); }
 .picker-tools { display: flex; gap: 10px; align-items: center; }
 .picker-tools input { flex: 1; padding: 9px 12px; font-size: 13px; }
 .picker-tools button.link { white-space: nowrap; }
-.selections { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.selections { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.selections .mini-label { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--muted); }
 .selections input.sel-filter { padding: 8px 12px; font-size: 12px; max-width: 320px; }
 .selection-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .selection-chip {

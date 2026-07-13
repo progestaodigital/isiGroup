@@ -1,6 +1,6 @@
 {
   "name": "isigroup-sidecar",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "private": true,
   "type": "module",
   "description": "Sidecar Node da isigroup: conexao WhatsApp (Baileys), envio, eventos, scheduler e persistencia SQLite. Servidor HTTP local em 127.0.0.1 protegido por token de sessao.",
