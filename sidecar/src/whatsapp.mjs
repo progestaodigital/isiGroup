@@ -536,6 +536,8 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
         name,
         type: classifyTarget(g),
         is_admin: isAdmin,
+        // Grupo "so admins enviam": membro comum nao consegue postar.
+        announce: g.announce ? 1 : 0,
         last_synced_at: now,
       });
     }
@@ -556,12 +558,13 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
     }
 
     const upsert = db.prepare(`
-      INSERT INTO targets (account_id, jid, name, type, is_admin, last_synced_at)
-      VALUES (@account_id, @jid, @name, @type, @is_admin, @last_synced_at)
+      INSERT INTO targets (account_id, jid, name, type, is_admin, announce, last_synced_at)
+      VALUES (@account_id, @jid, @name, @type, @is_admin, @announce, @last_synced_at)
       ON CONFLICT(account_id, jid) DO UPDATE SET
         name = excluded.name,
         type = excluded.type,
         is_admin = excluded.is_admin,
+        announce = excluded.announce,
         last_synced_at = excluded.last_synced_at
     `);
 
@@ -574,6 +577,7 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
           name: r.name,
           type: r.type,
           is_admin: r.is_admin,
+          announce: r.announce,
           last_synced_at: r.last_synced_at,
         });
       }

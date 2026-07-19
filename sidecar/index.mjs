@@ -824,7 +824,7 @@ function listSchedules() {
               COUNT(st.id) AS total,
               SUM(st.status = 'sent')   AS sent,
               SUM(st.status = 'failed') AS failed,
-              SUM(st.status = 'skipped_no_coverage') AS skipped,
+              SUM(st.status IN ('skipped_no_coverage', 'skipped_no_admin')) AS skipped,
               GROUP_CONCAT(DISTINCT a.label) AS chips
          FROM schedules s
          LEFT JOIN schedule_targets st ON st.schedule_id = s.id
@@ -904,8 +904,9 @@ function rescheduleSchedule(res, id, body) {
     db.prepare("UPDATE schedules SET recur_dow = ?, recur_time = ?, status = 'active', last_run_at = NULL WHERE id = ?")
       .run(body.recur_dow, body.recur_time, id);
   }
-  // Reabilita os alvos que nao foram enviados ainda (ou todos, para refazer).
-  db.prepare("UPDATE schedule_targets SET status = 'pending', sent_at = NULL, error = NULL, seq_step = 0 WHERE schedule_id = ? AND status != 'skipped_no_coverage'").run(id);
+  // Reabilita todos os alvos, inclusive os pulados: a cobertura/admin e
+  // reavaliada no disparo (chipFor), que re-pula sem tentar se nada mudou.
+  db.prepare("UPDATE schedule_targets SET status = 'pending', sent_at = NULL, error = NULL, seq_step = 0 WHERE schedule_id = ?").run(id);
   return json(res, 200, { ok: true });
 }
 

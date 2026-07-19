@@ -398,6 +398,17 @@ button.link.danger { color: var(--danger); }
 .field { display: flex; flex-direction: column; gap: 7px; }
 .field > span { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--muted); }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+/* O dropdown NATIVO do <select> abre com fundo branco no Windows (WebView2) e
+   as <option> herdavam o texto claro do tema — cinza sobre branco, ilegivel.
+   Opcoes nao aceitam o resto do tema; fixamos escuro-sobre-branco explicito
+   (vale para TODOS os selects: agendador, automacao, reagendar…). */
+select option,
+select optgroup {
+  background: #ffffff;
+  color: #1a1a1a;
+}
+select option:disabled { color: rgba(26, 26, 26, 0.45); }
+
 .field input, .field textarea, .field select {
   background: var(--input-bg);
   border: 1px solid var(--border);
