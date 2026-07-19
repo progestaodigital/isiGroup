@@ -6,7 +6,7 @@
 // Uso: node scripts/make-latest-json.mjs
 // Saída: src-tauri/target/release/bundle/latest.json (anexar à release do GitHub).
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,9 +20,24 @@ const nsisDir = join(root, 'src-tauri', 'target', 'release', 'bundle', 'nsis');
 const exeName = `isigroup_${version}_x64-setup.exe`;
 const sig = readFileSync(join(nsisDir, `${exeName}.sig`), 'utf8').trim();
 
+// Notas da versao: o "Ver mudanças" do app mostra este campo (updater.body)
+// como texto puro (.changelog, pre-wrap). Converte o notes.md da release em
+// texto legivel: remove o titulo redundante, vira "###" em linha de secao e
+// "- " em bullet; sem notes.md, cai no rotulo generico.
+function releaseNotes() {
+  const path = join(root, 'notes.md');
+  if (!existsSync(path)) return `isiGroup ${version}`;
+  return readFileSync(path, 'utf8')
+    .replace(/^##\s+isiGroup.*\r?\n/, '') // titulo (o banner ja mostra a versao)
+    .replace(/^###\s+/gm, '')
+    .replace(/^- /gm, '• ')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .trim();
+}
+
 const manifest = {
   version,
-  notes: `isiGroup ${version}`,
+  notes: releaseNotes(),
   pub_date: new Date().toISOString(),
   platforms: {
     'windows-x86_64': {
