@@ -1,10 +1,12 @@
-## isiGroup v0.1.10
+## isiGroup v0.1.11
 
-### Envios recorrentes muito mais confiáveis
-- **Grupos sem cobertura não geram mais falha** — alvos que nenhum chip selecionado cobre agora são pulados sem tentativa de envio (e voltam a enviar sozinhos se um chip passar a cobrir o grupo).
-- **Rodízio ciente de admin** — em grupos "só admins enviam" (incluindo avisos de comunidade), o envio é roteado para um chip **admin**; sem nenhum admin disponível, o alvo é pulado em vez de falhar toda semana. Requer uma sincronização dos grupos para valer em grupos comuns com "só admins".
-- **Retomada no mesmo dia** — se a conexão (ou o app) cair no meio de um disparo recorrente, os grupos que ficaram pendentes são enviados automaticamente assim que a conexão voltar, sem duplicar o que já foi enviado (sequências continuam do passo onde pararam).
-- **Re-tentativa automática** — erros transitórios do WhatsApp (timeout, limite de taxa) ganham uma segunda tentativa antes de marcar falha.
+### Automação: nova ação "Apagar mensagem"
+- **Apaga a mensagem que disparou o gatilho** — nos gatilhos de mensagem ("Enviou mensagem" e "Mensagem contém link"), a regra pode agora revogar (apagar para todos) a mensagem. Requer um chip **admin** do grupo.
+- **Anti-link "silencioso"** — remove o link sem precisar expulsar a pessoa; pode ser combinada com "Excluir do grupo" para limpar o link e tirar quem postou.
+
+### Agendador: edição completa
+- **"Reagendar" virou "Editar"** — antes só dava para mudar a data/hora; agora o agendamento reabre inteiro, já preenchido, e você altera título, quando, destino, a mensagem/sequência, o intervalo, os grupos e os chips.
+- **Recorrente re-arma ao salvar** — editar um recorrente libera o disparo do dia de novo; editar um agendamento único cancelado o reativa.
 
 ### Interface
-- **Selects legíveis** — as opções dos menus suspensos (dia da semana, reagendar, automação) agora aparecem em texto escuro sobre fundo claro, em vez de cinza sobre branco.
+- **Nova aba "Suporte"** — fale com o atendimento sem sair do app; o chat abre embutido dentro do isigroup.
