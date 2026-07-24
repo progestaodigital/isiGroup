@@ -592,3 +592,15 @@ select option:disabled { color: rgba(26, 26, 26, 0.45); }
   0%, 100% { box-shadow: 0 0 45px rgba(204, 255, 0, 0.28); }
   50% { box-shadow: 0 0 85px rgba(204, 255, 0, 0.5); }
 }
+
+/* Suporte: atendimento (isiflow) embutido, ocupando a área de conteúdo. */
+.support-view { display: flex; flex-direction: column; }
+.support-frame {
+  width: 100%;
+  height: calc(100vh - 170px);
+  min-height: 420px;
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #fff;
+}

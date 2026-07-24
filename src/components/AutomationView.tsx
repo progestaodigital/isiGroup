@@ -38,8 +38,17 @@ const ACTION_LABEL: Record<ActionType, string> = {
   group_message: "Mensagem no grupo",
   dm: "Mensagem no privado",
   remove: "Excluir do grupo",
+  delete_message: "Apagar mensagem",
   webhook: "Webhook",
 };
+
+// "Apagar mensagem" só existe para gatilhos de mensagem (join/leave não têm o que apagar).
+function actionTypesFor(trigger: TriggerType): ActionType[] {
+  const base: ActionType[] = ["group_message", "dm", "remove"];
+  if (trigger === "message" || trigger === "message_link") base.push("delete_message");
+  base.push("webhook");
+  return base;
+}
 
 export function AutomationView({ isPro }: { isPro: boolean }) {
   const [targets, setTargets] = useState<Target[]>([]);
@@ -221,6 +230,14 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
   }, [isPro]);
   const multiChip = isPro && accounts.length >= 2;
 
+  // Troca o gatilho; ao sair de gatilho de mensagem, converte ações "apagar
+  // mensagem" (sem sentido em join/leave) para "mensagem no grupo".
+  function chooseTrigger(t: TriggerType) {
+    setTrigger(t);
+    if (t !== "message" && t !== "message_link") {
+      setActions((arr) => arr.map((a) => (a.type === "delete_message" ? { ...a, type: "group_message" } : a)));
+    }
+  }
   function toggleScope(jid: string) {
     setScope((prev) => { const next = new Set(prev); next.has(jid) ? next.delete(jid) : next.add(jid); return next; });
   }
@@ -266,6 +283,8 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
       } else if (a.type === "webhook") {
         if (!/^https?:\/\//i.test(a.url)) return setErr("Informe uma URL http(s) válida no webhook.");
         apiActions.push({ type: "webhook", url: a.url, secret: a.secret, ...delay });
+      } else if (a.type === "delete_message") {
+        apiActions.push({ type: "delete_message", ...delay });
       } else {
         apiActions.push({ type: "remove", ...delay });
       }
@@ -305,7 +324,7 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
         <span>Gatilho — quando…</span>
         <div className="seg">
           {(["message", "message_link", "join", "leave"] as TriggerType[]).map((t) => (
-            <button key={t} type="button" className={trigger === t ? "on" : ""} onClick={() => setTrigger(t)}>{TRIGGER_LABEL[t]}</button>
+            <button key={t} type="button" className={trigger === t ? "on" : ""} onClick={() => chooseTrigger(t)}>{TRIGGER_LABEL[t]}</button>
           ))}
         </div>
         {trigger === "message_link" && <span className="hint">Dispara quando a mensagem contém qualquer link (http, www ou domínio).</span>}
@@ -376,7 +395,7 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
           <div key={a.key} className="step-card">
             <div className="step-head">
               <div className="seg small-seg">
-                {(["group_message", "dm", "remove", "webhook"] as ActionType[]).map((t) => (
+                {actionTypesFor(trigger).map((t) => (
                   <button key={t} type="button" className={a.type === t ? "on" : ""} onClick={() => patchAction(i, { type: t })}>{ACTION_LABEL[t]}</button>
                 ))}
               </div>
@@ -398,6 +417,7 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
               </>
             )}
             {a.type === "remove" && <span className="hint">Remove o autor/membro do grupo. Admins nunca são removidos (trava de segurança).</span>}
+            {a.type === "delete_message" && <span className="hint">Apaga a mensagem que disparou o gatilho. Requer um chip <b>admin</b> do grupo.</span>}
             {a.type === "webhook" && (
               <>
                 <input type="text" value={a.url} onChange={(e) => { const v = e.currentTarget.value; patchAction(i, { url: v }); }} placeholder="https://seu-crm/webhook" />

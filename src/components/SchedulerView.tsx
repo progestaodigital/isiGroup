@@ -3,6 +3,7 @@ import {
   Account,
   ApiStep,
   PayloadType,
+  ScheduleDetail,
   ScheduleKind,
   ScheduleRow,
   Target,
@@ -10,12 +11,13 @@ import {
   createSchedule,
   deleteSchedule,
   getCoverage,
+  getScheduleDetail,
   listAccounts,
   listSchedules,
   listTargets,
-  rescheduleSchedule,
+  updateSchedule,
 } from "../lib/api";
-import { StepDraft, newStep, stepDraftToApi, StepSequenceEditor } from "./StepEditor";
+import { StepDraft, draftFromStored, newStep, stepDraftToApi, StepSequenceEditor } from "./StepEditor";
 import { GroupPicker } from "./GroupPicker";
 import { usePager, Pager } from "./Pager";
 
@@ -39,10 +41,26 @@ const TYPE_LABEL: Record<string, string> = {
   sequence: "Sequência",
 };
 
+// ISO (UTC) -> valor de <input type="datetime-local"> (hora local, sem fuso).
+function isoToLocalInput(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// Segundos -> {valor, unidade} amigável (para o intervalo entre passos).
+function secToUnit(sec: number | null | undefined): { value: number; unit: "s" | "min" } {
+  const s = sec ?? 0;
+  if (s > 0 && s % 60 === 0) return { value: s / 60, unit: "min" };
+  return { value: s, unit: "s" };
+}
+
 export function SchedulerView({ isPro }: { isPro: boolean }) {
   const [targets, setTargets] = useState<Target[]>([]);
   const [schedules, setSchedules] = useState<ScheduleRow[]>([]);
   const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState<ScheduleDetail | null>(null);
 
   const refresh = useCallback(async () => {
     const { schedules } = await listSchedules();
@@ -56,6 +74,17 @@ export function SchedulerView({ isPro }: { isPro: boolean }) {
     return () => window.clearInterval(t);
   }, [refresh]);
 
+  async function startEdit(id: number) {
+    try {
+      const detail = await getScheduleDetail(id);
+      setEditing(detail);
+      setShowForm(true);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (e) {
+      alert("Não foi possível abrir este agendamento para edição.\n" + String(e));
+    }
+  }
+
   const once = schedules.filter((s) => s.kind === "once");
   const recurring = schedules.filter((s) => s.kind === "recurring");
 
@@ -66,31 +95,50 @@ export function SchedulerView({ isPro }: { isPro: boolean }) {
           <h1>Agendador</h1>
           <p className="muted">Sequências multi-formato (texto, imagem, áudio, vídeo, enquete) — único ou recorrente.</p>
         </div>
-        <button onClick={() => setShowForm((v) => !v)}>{showForm ? "Fechar" : "Novo agendamento"}</button>
+        <button
+          onClick={() => {
+            if (editing) { setEditing(null); setShowForm(true); }
+            else setShowForm((v) => !v);
+          }}
+        >
+          {showForm && !editing ? "Fechar" : "Novo agendamento"}
+        </button>
       </div>
 
       {showForm && (
         <ScheduleForm
+          key={editing?.schedule.id ?? "new"}
           targets={targets}
           isPro={isPro}
+          editing={editing}
           onCreated={() => {
             setShowForm(false);
+            setEditing(null);
             refresh();
           }}
         />
       )}
 
       <h2 className="section-title">Disparo único</h2>
-      <ScheduleList rows={once} onChange={refresh} />
+      <ScheduleList rows={once} onChange={refresh} onEdit={startEdit} />
 
       <h2 className="section-title">Recorrentes</h2>
-      <ScheduleList rows={recurring} onChange={refresh} recurring />
+      <ScheduleList rows={recurring} onChange={refresh} onEdit={startEdit} recurring />
     </div>
   );
 }
 
-function ScheduleList({ rows, onChange, recurring }: { rows: ScheduleRow[]; onChange: () => void; recurring?: boolean }) {
-  const [editing, setEditing] = useState<number | null>(null);
+function ScheduleList({
+  rows,
+  onChange,
+  onEdit,
+  recurring,
+}: {
+  rows: ScheduleRow[];
+  onChange: () => void;
+  onEdit: (id: number) => void;
+  recurring?: boolean;
+}) {
   const { slice, page, pageCount, setPage } = usePager(rows);
   if (rows.length === 0) {
     return (
@@ -104,6 +152,8 @@ function ScheduleList({ rows, onChange, recurring }: { rows: ScheduleRow[]; onCh
       {slice.map((s) => {
         const st = STATUS[s.status] ?? STATUS.pending;
         const canCancel = s.status === "pending" || s.status === "active";
+        // Recorrentes sempre editáveis; únicos, enquanto ainda não dispararam.
+        const canEdit = recurring || s.status === "pending" || s.status === "canceled";
         return (
           <div key={s.id} className="row-item col">
             <div className="row-main">
@@ -123,16 +173,15 @@ function ScheduleList({ rows, onChange, recurring }: { rows: ScheduleRow[]; onCh
               </div>
               <div className="tags">
                 <span className={`tag ${st.cls}`}>{st.label}</span>
-                <button className="link subtle" onClick={() => setEditing(editing === s.id ? null : s.id)}>Reagendar</button>
+                {canEdit && (
+                  <button className="link subtle" onClick={() => onEdit(s.id)}>Editar</button>
+                )}
                 {canCancel && (
                   <button className="link subtle" onClick={async () => { await cancelSchedule(s.id); onChange(); }}>Cancelar</button>
                 )}
                 <button className="link subtle danger" onClick={async () => { if (confirm("Apagar este agendamento?")) { await deleteSchedule(s.id); onChange(); } }}>Apagar</button>
               </div>
             </div>
-            {editing === s.id && (
-              <RescheduleEditor schedule={s} onDone={() => { setEditing(null); onChange(); }} />
-            )}
           </div>
         );
       })}
@@ -141,56 +190,33 @@ function ScheduleList({ rows, onChange, recurring }: { rows: ScheduleRow[]; onCh
   );
 }
 
-function RescheduleEditor({ schedule, onDone }: { schedule: ScheduleRow; onDone: () => void }) {
-  const [when, setWhen] = useState("");
-  const [dow, setDow] = useState(schedule.recur_dow ?? 1);
-  const [time, setTime] = useState(schedule.recur_time ?? "19:00");
-  const [busy, setBusy] = useState(false);
+function ScheduleForm({
+  targets,
+  isPro,
+  editing,
+  onCreated,
+}: {
+  targets: Target[];
+  isPro: boolean;
+  editing?: ScheduleDetail | null;
+  onCreated: () => void;
+}) {
+  const ivMin = editing ? secToUnit(editing.schedule.step_min_s) : null;
+  const ivMax = editing ? secToUnit(editing.schedule.step_max_s) : null;
 
-  async function save() {
-    setBusy(true);
-    try {
-      if (schedule.kind === "once") {
-        if (!when) return;
-        await rescheduleSchedule(schedule.id, { scheduled_at: new Date(when).toISOString() });
-      } else {
-        await rescheduleSchedule(schedule.id, { recur_dow: dow, recur_time: time });
-      }
-      onDone();
-    } finally {
-      setBusy(false);
-    }
-  }
+  const [name, setName] = useState(editing?.schedule.name ?? "");
+  const [kind, setKind] = useState<ScheduleKind>(editing?.schedule.kind ?? "once");
+  const [when, setWhen] = useState(editing?.schedule.kind === "once" ? isoToLocalInput(editing.schedule.scheduled_at) : "");
+  const [dow, setDow] = useState(editing?.schedule.recur_dow ?? 1);
+  const [time, setTime] = useState(editing?.schedule.recur_time ?? "19:00");
+  const [mode, setMode] = useState<"broadcast" | "per_target">(editing?.schedule.content_mode ?? "broadcast");
 
-  return (
-    <div className="reschedule">
-      {schedule.kind === "once" ? (
-        <input type="datetime-local" value={when} onChange={(e) => setWhen(e.currentTarget.value)} />
-      ) : (
-        <div className="recur-row">
-          <select value={dow} onChange={(e) => setDow(Number(e.currentTarget.value))}>
-            {DOW.map((d, i) => (<option key={i} value={i}>{d}</option>))}
-          </select>
-          <input type="time" value={time} onChange={(e) => setTime(e.currentTarget.value)} />
-        </div>
-      )}
-      <button onClick={save} disabled={busy || (schedule.kind === "once" && !when)}>{busy ? "Salvando…" : "Salvar"}</button>
-    </div>
+  const [steps, setSteps] = useState<StepDraft[]>(
+    editing && editing.steps.length ? editing.steps.map(draftFromStored) : [newStep()]
   );
-}
-
-function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro: boolean; onCreated: () => void }) {
-  const [name, setName] = useState("");
-  const [kind, setKind] = useState<ScheduleKind>("once");
-  const [when, setWhen] = useState("");
-  const [dow, setDow] = useState(1);
-  const [time, setTime] = useState("19:00");
-  const [mode, setMode] = useState<"broadcast" | "per_target">("broadcast");
-
-  const [steps, setSteps] = useState<StepDraft[]>([newStep()]);
-  const [intMin, setIntMin] = useState(1);
-  const [intMax, setIntMax] = useState(3);
-  const [intUnit, setIntUnit] = useState<"s" | "min">("min");
+  const [intMin, setIntMin] = useState(ivMin?.value || 1);
+  const [intMax, setIntMax] = useState(ivMax?.value || (ivMin?.value || 3));
+  const [intUnit, setIntUnit] = useState<"s" | "min">(ivMin && ivMin.value ? ivMin.unit : "min");
 
   const [perText, setPerText] = useState<Record<number, string>>({});
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -199,7 +225,7 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
 
   // Multi-chip: chips disponíveis + seleção de quais usar (group-first).
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [selectedChips, setSelectedChips] = useState<Set<number>>(new Set());
+  const [selectedChips, setSelectedChips] = useState<Set<number>>(new Set(editing?.schedule.account_ids ?? []));
   const [uncovered, setUncovered] = useState(0);
 
   useEffect(() => {
@@ -207,7 +233,8 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
     listAccounts()
       .then((r) => {
         setAccounts(r.accounts);
-        setSelectedChips(new Set(r.accounts.filter((a) => a.status === "connected").map((a) => a.id)));
+        // Ao criar, marca todos os chips conectados; ao editar, preserva o que foi salvo.
+        if (!editing) setSelectedChips(new Set(r.accounts.filter((a) => a.status === "connected").map((a) => a.id)));
       })
       .catch(() => {});
   }, [isPro]);
@@ -224,6 +251,30 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
   }, [visibleTargets]);
   const selectedTargets = useMemo(() => groups.filter((t) => selected.has(t.id)), [groups, selected]);
   const uploadingAny = steps.some((s) => s.uploading);
+
+  // Ao editar: reconstrói a seleção de grupos + textos por grupo assim que a
+  // lista de grupos estiver pronta (mapeando pelos jids salvos no agendamento).
+  useEffect(() => {
+    if (!editing) return;
+    const wanted = new Set(editing.targets.map((t) => t.jid));
+    const sel = new Set<number>();
+    const pt: Record<number, string> = {};
+    for (const g of groups) {
+      if (!wanted.has(g.jid)) continue;
+      sel.add(g.id);
+      const tgt = editing.targets.find((t) => t.jid === g.jid);
+      if (tgt?.message_json) {
+        try {
+          const m = JSON.parse(tgt.message_json);
+          if (m?.text) pt[g.id] = String(m.text);
+        } catch {
+          /* ignora json inválido */
+        }
+      }
+    }
+    setSelected(sel);
+    setPerText(pt);
+  }, [editing, groups]);
 
   // Prévia de cobertura: quantos grupos ficariam sem chip selecionado que os cubra.
   useEffect(() => {
@@ -290,9 +341,12 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
         account_ids: multiChip ? [...selectedChips] : undefined,
       };
       const built = await buildTargets();
+      const editId = editing?.schedule.id ?? null;
+      const save = (payload: Parameters<typeof createSchedule>[0]) =>
+        editId != null ? updateSchedule(editId, payload) : createSchedule(payload);
 
       if (mode === "per_target") {
-        await createSchedule({
+        await save({
           ...base,
           content_mode: "per_target",
           payload_type: "text",
@@ -305,7 +359,7 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
           if ("error" in r) return setErr(r.error);
           apiSteps.push(r);
         }
-        await createSchedule({
+        await save({
           ...base,
           content_mode: "broadcast",
           payload_type: apiSteps.length > 1 ? "sequence" : (apiSteps[0].type as PayloadType),
@@ -325,12 +379,14 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
 
   return (
     <form className="card form" onSubmit={submit}>
+      {editing && <p className="muted small">Editando <b>{editing.schedule.name || "(sem título)"}</b>. As alterações substituem o conteúdo e reagendam o disparo.</p>}
       <div className="field">
         <span>Tipo de disparo</span>
         <div className="seg">
-          <button type="button" className={kind === "once" ? "on" : ""} onClick={() => setKind("once")}>Único</button>
-          <button type="button" className={kind === "recurring" ? "on" : ""} onClick={() => setKind("recurring")}>Recorrente (semanal)</button>
+          <button type="button" className={kind === "once" ? "on" : ""} disabled={!!editing} onClick={() => setKind("once")}>Único</button>
+          <button type="button" className={kind === "recurring" ? "on" : ""} disabled={!!editing} onClick={() => setKind("recurring")}>Recorrente (semanal)</button>
         </div>
+        {editing && <span className="hint">O tipo de disparo não muda na edição — crie um novo para trocar.</span>}
       </div>
 
       <div className="field-row">
@@ -441,7 +497,9 @@ function ScheduleForm({ targets, isPro, onCreated }: { targets: Target[]; isPro:
 
       {err && <p className="error">{err}</p>}
       <div className="gate-actions" style={{ justifyContent: "flex-start" }}>
-        <button type="submit" disabled={busy || uploadingAny}>{busy ? "Agendando…" : "Agendar"}</button>
+        <button type="submit" disabled={busy || uploadingAny}>
+          {busy ? (editing ? "Salvando…" : "Agendando…") : editing ? "Salvar alterações" : "Agendar"}
+        </button>
       </div>
     </form>
   );

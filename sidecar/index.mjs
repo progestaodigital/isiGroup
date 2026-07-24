@@ -299,6 +299,10 @@ async function route(req, res, url) {
   if (method === 'POST' && reschedule) {
     return rescheduleSchedule(res, Number(reschedule[1]), await readJson(req));
   }
+  const schedUpd = path.match(/^\/schedules\/(\d+)$/);
+  if (method === 'PUT' && schedUpd) {
+    return updateSchedule(res, Number(schedUpd[1]), await readJson(req));
+  }
   const del = path.match(/^\/schedules\/(\d+)$/);
   if (method === 'DELETE' && del) {
     return deleteSchedule(res, Number(del[1]));
@@ -392,7 +396,9 @@ function computeCoverage(groupJids, accountIds) {
 
 // --- Handlers de agendamento ---
 
-function createSchedule(res, body) {
+// Valida e normaliza o corpo de um agendamento (create/update). Retorna
+// { error } ou os campos ja prontos para gravar. Compartilhado por criar/editar.
+function parseScheduleInput(body) {
   const {
     name, scheduled_at, content_mode, default_text, targets,
     kind: rawKind, recur_dow, recur_time,
@@ -407,18 +413,18 @@ function createSchedule(res, body) {
       : null;
 
   if (!Array.isArray(targets) || targets.length === 0) {
-    return json(res, 400, { error: 'bad_request', message: 'selecione ao menos um alvo' });
+    return { error: 'selecione ao menos um alvo' };
   }
   const kind = rawKind === 'recurring' ? 'recurring' : 'once';
 
   if (kind === 'once' && !scheduled_at) {
-    return json(res, 400, { error: 'bad_request', message: 'data/hora obrigatoria' });
+    return { error: 'data/hora obrigatoria' };
   }
   if (kind === 'recurring') {
     const dowOk = Number.isInteger(recur_dow) && recur_dow >= 0 && recur_dow <= 6;
     const timeOk = typeof recur_time === 'string' && /^\d{2}:\d{2}$/.test(recur_time);
     if (!dowOk || !timeOk) {
-      return json(res, 400, { error: 'bad_request', message: 'dia da semana (0-6) e horario HH:MM obrigatorios' });
+      return { error: 'dia da semana (0-6) e horario HH:MM obrigatorios' };
     }
   }
 
@@ -440,7 +446,7 @@ function createSchedule(res, body) {
     const normalized = [];
     for (const rs of rawSteps) {
       const n = normalizeStep(rs);
-      if (n.error) return json(res, 400, { error: 'bad_request', message: n.error });
+      if (n.error) return { error: n.error };
       normalized.push(n);
     }
     richSteps = normalized;
@@ -460,24 +466,24 @@ function createSchedule(res, body) {
       const single = String(default_text ?? '').trim();
       if (msgs.length) legacyTextSteps = msgs;
       else if (single) legacyTextSteps = [single];
-      else return json(res, 400, { error: 'bad_request', message: 'mensagem vazia' });
+      else return { error: 'mensagem vazia' };
       defaultJson = JSON.stringify({ text: legacyTextSteps[0] });
       if (legacyTextSteps.length > 1) {
         stepMin = Number.isInteger(step_min_s) && step_min_s >= 0 ? step_min_s : 5;
         stepMax = Number.isInteger(step_max_s) && step_max_s >= stepMin ? step_max_s : stepMin;
       }
     } else if (payloadType === 'video' || payloadType === 'image') {
-      if (!media?.stored_path) return json(res, 400, { error: 'bad_request', message: 'envie o arquivo' });
+      if (!media?.stored_path) return { error: 'envie o arquivo' };
       defaultJson = JSON.stringify({ text: String(default_text ?? '') });
     } else if (payloadType === 'audio') {
-      if (!media?.stored_path) return json(res, 400, { error: 'bad_request', message: 'envie o audio' });
+      if (!media?.stored_path) return { error: 'envie o audio' };
       defaultJson = JSON.stringify({});
     } else {
       const values = Array.isArray(poll?.values)
         ? poll.values.map((v) => String(v).trim()).filter(Boolean)
         : [];
       if (!String(poll?.name ?? '').trim() || values.length < 2) {
-        return json(res, 400, { error: 'bad_request', message: 'enquete precisa de pergunta e ao menos 2 opcoes' });
+        return { error: 'enquete precisa de pergunta e ao menos 2 opcoes' };
       }
       const selectableCount =
         Number.isInteger(poll.selectableCount) && poll.selectableCount >= 1
@@ -486,9 +492,6 @@ function createSchedule(res, body) {
       defaultJson = JSON.stringify({ poll: { name: String(poll.name).trim(), values, selectableCount } });
     }
   }
-
-  const now = new Date().toISOString();
-  const account = db.prepare('SELECT id FROM accounts ORDER BY id LIMIT 1').get();
 
   // Recorrente: se hoje ja e o dia e a hora ja passou, marca como "rodado hoje".
   let initialLastRun = null;
@@ -500,6 +503,84 @@ function createSchedule(res, body) {
       initialLastRun = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
     }
   }
+
+  return {
+    name: name ?? null,
+    kind, mode, payloadType, defaultJson,
+    richSteps, legacyTextSteps, stepMin, stepMax,
+    media, poolJson,
+    scheduled_at: kind === 'once' ? new Date(scheduled_at).toISOString() : null,
+    recur_dow: kind === 'recurring' ? recur_dow : null,
+    recur_time: kind === 'recurring' ? recur_time : null,
+    initialLastRun,
+    targets,
+  };
+}
+
+// Insere os passos/midia/alvos de um agendamento (compartilhado por create/update).
+function writeScheduleRows(scheduleId, p) {
+  if (p.richSteps) {
+    // Passos multi-formato (autossuficientes).
+    const insStep = db.prepare(
+      `INSERT INTO schedule_steps
+         (schedule_id, order_index, payload_type, body_json,
+          media_path, media_mimetype, media_kind, media_duration_seconds, media_waveform_json)
+       VALUES (?,?,?,?,?,?,?,?,?)`
+    );
+    p.richSteps.forEach((s, idx) =>
+      insStep.run(
+        scheduleId, idx, s.payload_type, s.body_json,
+        s.media?.stored_path ?? null,
+        s.media?.mimetype ?? null,
+        s.media?.kind ?? null,
+        s.media?.duration_seconds ?? null,
+        s.media?.waveform_json ?? null
+      )
+    );
+  } else if (p.legacyTextSteps) {
+    // Sequencia de texto legada (coluna text).
+    const insStep = db.prepare(
+      'INSERT INTO schedule_steps (schedule_id, order_index, payload_type, body_json, text) VALUES (?,?,?,?,?)'
+    );
+    p.legacyTextSteps.forEach((t, idx) =>
+      insStep.run(scheduleId, idx, 'text', JSON.stringify({ text: t }), t)
+    );
+  } else if (['audio', 'video', 'image'].includes(p.payloadType)) {
+    // Midia unica legada.
+    db.prepare(
+      `INSERT INTO media_assets (schedule_id, path, mimetype, kind, duration_seconds, waveform_json)
+       VALUES (?,?,?,?,?,?)`
+    ).run(
+      scheduleId,
+      p.media.stored_path,
+      p.media.mimetype ?? null,
+      p.media.kind ?? p.payloadType,
+      p.media.duration_seconds ?? null,
+      p.media.waveform_json ?? null
+    );
+  }
+
+  const insTarget = db.prepare(
+    `INSERT INTO schedule_targets (schedule_id, target_id, account_id, message_json, status)
+     VALUES (?,?,?,?,?)`
+  );
+  for (const t of p.targets) {
+    const targetId = typeof t === 'object' ? t.target_id : t;
+    // Roteamento multi-chip: account_id define qual chip envia (null = primaria).
+    const accountId = typeof t === 'object' && Number.isInteger(t.account_id) ? t.account_id : null;
+    const skipped = typeof t === 'object' && t.skipped;
+    const perText = typeof t === 'object' ? t.message : null;
+    const msgJson = p.mode === 'per_target' && perText ? JSON.stringify({ text: String(perText) }) : null;
+    insTarget.run(scheduleId, targetId, accountId, msgJson, skipped ? 'skipped_no_coverage' : 'pending');
+  }
+}
+
+function createSchedule(res, body) {
+  const p = parseScheduleInput(body);
+  if (p.error) return json(res, 400, { error: 'bad_request', message: p.error });
+
+  const now = new Date().toISOString();
+  const account = db.prepare('SELECT id FROM accounts ORDER BY id LIMIT 1').get();
 
   db.exec('BEGIN;');
   let scheduleId;
@@ -513,77 +594,23 @@ function createSchedule(res, body) {
       )
       .run(
         account?.id ?? null,
-        name ?? null,
-        kind === 'once' ? new Date(scheduled_at).toISOString() : null,
-        payloadType,
-        mode,
-        defaultJson,
-        kind === 'once' ? 'pending' : 'active',
+        p.name,
+        p.scheduled_at,
+        p.payloadType,
+        p.mode,
+        p.defaultJson,
+        p.kind === 'once' ? 'pending' : 'active',
         now,
-        kind,
-        kind === 'recurring' ? recur_dow : null,
-        kind === 'recurring' ? recur_time : null,
-        initialLastRun,
-        stepMin,
-        stepMax,
-        poolJson
+        p.kind,
+        p.recur_dow,
+        p.recur_time,
+        p.initialLastRun,
+        p.stepMin,
+        p.stepMax,
+        p.poolJson
       );
     scheduleId = r.lastInsertRowid;
-
-    if (richSteps) {
-      // Passos multi-formato (autossuficientes).
-      const insStep = db.prepare(
-        `INSERT INTO schedule_steps
-           (schedule_id, order_index, payload_type, body_json,
-            media_path, media_mimetype, media_kind, media_duration_seconds, media_waveform_json)
-         VALUES (?,?,?,?,?,?,?,?,?)`
-      );
-      richSteps.forEach((s, idx) =>
-        insStep.run(
-          scheduleId, idx, s.payload_type, s.body_json,
-          s.media?.stored_path ?? null,
-          s.media?.mimetype ?? null,
-          s.media?.kind ?? null,
-          s.media?.duration_seconds ?? null,
-          s.media?.waveform_json ?? null
-        )
-      );
-    } else if (legacyTextSteps) {
-      // Sequencia de texto legada (coluna text).
-      const insStep = db.prepare(
-        'INSERT INTO schedule_steps (schedule_id, order_index, payload_type, body_json, text) VALUES (?,?,?,?,?)'
-      );
-      legacyTextSteps.forEach((t, idx) =>
-        insStep.run(scheduleId, idx, 'text', JSON.stringify({ text: t }), t)
-      );
-    } else if (['audio', 'video', 'image'].includes(payloadType)) {
-      // Midia unica legada.
-      db.prepare(
-        `INSERT INTO media_assets (schedule_id, path, mimetype, kind, duration_seconds, waveform_json)
-         VALUES (?,?,?,?,?,?)`
-      ).run(
-        scheduleId,
-        media.stored_path,
-        media.mimetype ?? null,
-        media.kind ?? payloadType,
-        media.duration_seconds ?? null,
-        media.waveform_json ?? null
-      );
-    }
-
-    const insTarget = db.prepare(
-      `INSERT INTO schedule_targets (schedule_id, target_id, account_id, message_json, status)
-       VALUES (?,?,?,?,?)`
-    );
-    for (const t of targets) {
-      const targetId = typeof t === 'object' ? t.target_id : t;
-      // Roteamento multi-chip: account_id define qual chip envia (null = primaria).
-      const accountId = typeof t === 'object' && Number.isInteger(t.account_id) ? t.account_id : null;
-      const skipped = typeof t === 'object' && t.skipped;
-      const perText = typeof t === 'object' ? t.message : null;
-      const msgJson = mode === 'per_target' && perText ? JSON.stringify({ text: String(perText) }) : null;
-      insTarget.run(scheduleId, targetId, accountId, msgJson, skipped ? 'skipped_no_coverage' : 'pending');
-    }
+    writeScheduleRows(scheduleId, p);
     db.exec('COMMIT;');
   } catch (e) {
     db.exec('ROLLBACK;');
@@ -591,6 +618,62 @@ function createSchedule(res, body) {
   }
 
   return json(res, 201, { id: scheduleId });
+}
+
+// Edita um agendamento (unico ou recorrente): mensagens, grupos e data/hora.
+// Reescreve passos/midia/alvos e reabilita o disparo (status pending/active).
+function updateSchedule(res, id, body) {
+  const existing = db.prepare('SELECT id FROM schedules WHERE id = ?').get(id);
+  if (!existing) return json(res, 404, { error: 'not_found' });
+
+  const p = parseScheduleInput(body);
+  if (p.error) return json(res, 400, { error: 'bad_request', message: p.error });
+
+  // Arquivos de midia unica antigos: removidos do disco apos o commit, exceto
+  // os que a nova versao continua referenciando (edicao mantendo o mesmo arquivo).
+  const oldAssets = db.prepare('SELECT path FROM media_assets WHERE schedule_id = ?').all(id);
+  const keepPaths = new Set();
+  if (p.richSteps) for (const s of p.richSteps) if (s.media?.stored_path) keepPaths.add(s.media.stored_path);
+  if (['audio', 'video', 'image'].includes(p.payloadType) && p.media?.stored_path) keepPaths.add(p.media.stored_path);
+
+  db.exec('BEGIN;');
+  try {
+    db.prepare(
+      `UPDATE schedules SET
+         name = ?, scheduled_at = ?, payload_type = ?, content_mode = ?, default_json = ?,
+         status = ?, kind = ?, recur_dow = ?, recur_time = ?, last_run_at = ?, recur_fired_at = NULL,
+         step_min_s = ?, step_max_s = ?, account_ids_json = ?, rotation_offset = 0
+       WHERE id = ?`
+    ).run(
+      p.name,
+      p.scheduled_at,
+      p.payloadType,
+      p.mode,
+      p.defaultJson,
+      p.kind === 'once' ? 'pending' : 'active',
+      p.kind,
+      p.recur_dow,
+      p.recur_time,
+      p.initialLastRun,
+      p.stepMin,
+      p.stepMax,
+      p.poolJson,
+      id
+    );
+    db.prepare('DELETE FROM schedule_targets WHERE schedule_id = ?').run(id);
+    db.prepare('DELETE FROM schedule_steps WHERE schedule_id = ?').run(id);
+    db.prepare('DELETE FROM media_assets WHERE schedule_id = ?').run(id);
+    writeScheduleRows(id, p);
+    db.exec('COMMIT;');
+  } catch (e) {
+    db.exec('ROLLBACK;');
+    return json(res, 500, { error: 'internal', message: e?.message ?? 'erro ao atualizar' });
+  }
+
+  for (const a of oldAssets) {
+    if (a.path && !keepPaths.has(a.path)) rmSync(a.path, { force: true });
+  }
+  return json(res, 200, { ok: true });
 }
 
 // --- Handlers de automacao ---
@@ -631,8 +714,12 @@ function validateRuleBody(body) {
 
   const prepared = [];
   for (const a of actions) {
-    const type = ['group_message', 'dm', 'remove', 'webhook'].includes(a?.type) ? a.type : null;
+    const type = ['group_message', 'dm', 'remove', 'webhook', 'delete_message'].includes(a?.type) ? a.type : null;
     if (!type) continue;
+    // "Apagar mensagem" so faz sentido em gatilhos de mensagem (ha algo para apagar).
+    if (type === 'delete_message' && trigger !== 'message' && trigger !== 'message_link') {
+      return { error: 'apagar mensagem so vale para gatilhos de mensagem' };
+    }
     let cfg = {};
     if (type === 'group_message' || type === 'dm') {
       const rawSteps = Array.isArray(a.steps) && a.steps.length
@@ -840,12 +927,60 @@ function scheduleDetail(res, id) {
   if (!schedule) return json(res, 404, { error: 'not_found' });
   const targets = db
     .prepare(
-      `SELECT st.id, st.status, st.sent_at, st.error, st.message_json, t.name, t.jid
+      `SELECT st.id, st.target_id, st.status, st.sent_at, st.error, st.message_json, st.account_id, t.name, t.jid
          FROM schedule_targets st JOIN targets t ON t.id = st.target_id
         WHERE st.schedule_id = ?`
     )
     .all(id);
-  return json(res, 200, { schedule, targets });
+
+  // Passos normalizados (para reidratar o editor). Cada passo ja traz a midia
+  // como objeto MediaInfo (ou null) — o front consome sem remontar colunas.
+  const steps = db
+    .prepare('SELECT * FROM schedule_steps WHERE schedule_id = ? ORDER BY order_index')
+    .all(id)
+    .map((s) => ({
+      order_index: s.order_index,
+      payload_type: s.payload_type ?? 'text',
+      body_json: s.body_json ?? (s.text ? JSON.stringify({ text: s.text }) : '{}'),
+      media: s.media_path
+        ? {
+            stored_path: s.media_path,
+            mimetype: s.media_mimetype ?? null,
+            kind: s.media_kind ?? null,
+            duration_seconds: s.media_duration_seconds ?? null,
+            waveform_json: s.media_waveform_json ?? null,
+          }
+        : null,
+    }));
+
+  // Agendamento legado sem passos (midia/enquete/texto unico via default_json):
+  // sintetiza um passo para que qualquer agendamento broadcast seja editavel.
+  if (steps.length === 0 && schedule.content_mode === 'broadcast') {
+    const body = safeObj(schedule.default_json);
+    const pt = schedule.payload_type;
+    const asset = db.prepare('SELECT * FROM media_assets WHERE schedule_id = ? LIMIT 1').get(id);
+    if (pt === 'poll' && body.poll) {
+      steps.push({ order_index: 0, payload_type: 'poll', body_json: JSON.stringify({ poll: body.poll }), media: null });
+    } else if (['image', 'video', 'audio'].includes(pt) && asset) {
+      const media = {
+        stored_path: asset.path,
+        mimetype: asset.mimetype ?? null,
+        kind: asset.kind ?? null,
+        duration_seconds: asset.duration_seconds ?? null,
+        waveform_json: asset.waveform_json ?? null,
+      };
+      const bj = pt === 'audio' ? '{}' : JSON.stringify({ caption: body.text ?? '' });
+      steps.push({ order_index: 0, payload_type: pt, body_json: bj, media });
+    } else {
+      steps.push({ order_index: 0, payload_type: 'text', body_json: JSON.stringify({ text: body.text ?? '' }), media: null });
+    }
+  }
+
+  return json(res, 200, {
+    schedule: { ...schedule, account_ids: safeArr(schedule.account_ids_json) },
+    steps,
+    targets,
+  });
 }
 
 function cancelSchedule(res, id) {

@@ -196,6 +196,7 @@ export function createWhatsApp(db, sessionRootDir) {
     accountSendDirect: (id, to, text) => getSession(id).sendDirect(to, text),
     accountRemoveParticipant: (id, jid, p) => getSession(id).removeParticipant(jid, p),
     accountIsParticipantAdmin: (id, jid, p) => getSession(id).isParticipantAdmin(jid, p),
+    accountDeleteMessage: (id, jid, key) => getSession(id).deleteMessage(jid, key),
     connectedAccountIds: () =>
       [...sessions.entries()].filter(([, s]) => s.isConnected()).map(([id]) => id),
 
@@ -215,6 +216,7 @@ export function createWhatsApp(db, sessionRootDir) {
     sendDirect: (to, text) => primary().sendDirect(to, text),
     removeParticipant: (jid, p) => primary().removeParticipant(jid, p),
     isParticipantAdmin: (jid, p) => primary().isParticipantAdmin(jid, p),
+    deleteMessage: (jid, key) => primary().deleteMessage(jid, key),
   };
 }
 
@@ -641,6 +643,13 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
     return sock.groupParticipantsUpdate(jid, [participant], 'remove');
   }
 
+  // Apaga (revoga) uma mensagem no grupo. Apagar mensagem de outro membro exige
+  // que este chip seja admin (regra do WhatsApp). `key` = m.key do evento recebido.
+  async function deleteMessage(jid, key) {
+    if (!isConnected()) throw new Error('WhatsApp nao conectado');
+    return sock.sendMessage(jid, { delete: key });
+  }
+
   async function isParticipantAdmin(jid, participant) {
     if (!isConnected()) return false;
     const md = await sock.groupMetadata(jid);
@@ -652,7 +661,7 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
 
   return {
     start, logout, getState, syncTargets, sendContent, isConnected,
-    replyText, sendDirect, removeParticipant, isParticipantAdmin,
+    replyText, sendDirect, removeParticipant, isParticipantAdmin, deleteMessage,
   };
 }
 

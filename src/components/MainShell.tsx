@@ -18,9 +18,12 @@ interface Props {
   onLicenseChange: (s: LicenseState) => void;
 }
 
-type View = "overview" | "connection" | "targets" | "scheduler" | "automation" | "faq";
+type View = "overview" | "connection" | "targets" | "scheduler" | "automation" | "faq" | "support";
 
 const FUTURE: { fase: number; nome: string }[] = [];
+
+// Atendimento (chat isiflow) — abre embutido dentro do app.
+const SUPPORT_URL = "https://www.isiflow.com.br/chat/b5cd3e5f2b3ec0c488f6045d5946826f";
 
 export function MainShell({ license, onLicenseChange }: Props) {
   const [view, setView] = useState<View>("overview");
@@ -72,6 +75,12 @@ export function MainShell({ license, onLicenseChange }: Props) {
           >
             Perguntas Frequentes
           </button>
+          <button
+            className={`nav-item ${view === "support" ? "active" : ""}`}
+            onClick={() => setView("support")}
+          >
+            Suporte
+          </button>
           {FUTURE.map((m) => (
             <button key={m.fase} className="nav-item" disabled title="Em desenvolvimento">
               {m.nome}
@@ -96,7 +105,28 @@ export function MainShell({ license, onLicenseChange }: Props) {
         {view === "scheduler" && <SchedulerView isPro={isPro} />}
         {view === "automation" && <AutomationView isPro={isPro} />}
         {view === "faq" && <FaqView isPro={isPro} />}
+        {view === "support" && <SupportView />}
       </main>
+    </div>
+  );
+}
+
+function SupportView() {
+  return (
+    <div className="support-view">
+      <div className="head-row">
+        <div>
+          <h1>Suporte</h1>
+          <p className="muted">Fale com nosso time de atendimento — tudo aqui dentro do isigroup.</p>
+        </div>
+        <a className="link subtle" href={SUPPORT_URL} target="_blank" rel="noreferrer">Abrir em janela</a>
+      </div>
+      <iframe
+        className="support-frame"
+        src={SUPPORT_URL}
+        title="Suporte isigroup"
+        allow="clipboard-write; microphone; camera"
+      />
     </div>
   );
 }

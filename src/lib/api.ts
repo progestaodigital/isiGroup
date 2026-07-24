@@ -347,7 +347,7 @@ export const rescheduleSchedule = (
 // --- Automações & Gatilhos ---
 export type TriggerType = "message" | "message_link" | "join" | "leave";
 export type MatchType = "starts_with" | "contains" | "ends_with" | "exact";
-export type ActionType = "group_message" | "dm" | "remove" | "webhook";
+export type ActionType = "group_message" | "dm" | "remove" | "webhook" | "delete_message";
 
 export interface StoredStep {
   payload_type?: string;
@@ -447,6 +447,41 @@ export const createSchedule = (s: NewSchedule) =>
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(s),
+  });
+
+// Detalhe completo de um agendamento (para reidratar o editor).
+export interface ScheduleDetail {
+  schedule: {
+    id: number;
+    name: string | null;
+    kind: ScheduleKind;
+    scheduled_at: string | null;
+    recur_dow: number | null;
+    recur_time: string | null;
+    content_mode: "broadcast" | "per_target";
+    payload_type: string;
+    step_min_s: number | null;
+    step_max_s: number | null;
+    account_ids: number[];
+  };
+  steps: StoredStep[];
+  targets: Array<{
+    target_id: number;
+    jid: string;
+    name: string;
+    message_json: string | null;
+    account_id: number | null;
+    status: string;
+  }>;
+}
+
+export const getScheduleDetail = (id: number) =>
+  sidecar<ScheduleDetail>(`/schedules/${id}`);
+
+export const updateSchedule = (id: number, s: NewSchedule) =>
+  sidecar<{ ok?: boolean; error?: string }>(`/schedules/${id}`, {
+    method: "PUT",
+    ...jbody(s),
   });
 
 export const listSchedules = () =>

@@ -166,6 +166,33 @@ export function createAutomation(db, wa, editionState) {
           }
           break;
         }
+        case 'delete_message': {
+          // Apaga a mensagem que disparou o gatilho. So se aplica a gatilhos de
+          // mensagem (join/leave nao tem mensagem para apagar).
+          if (triggerType !== 'message' && triggerType !== 'message_link') {
+            taken.push('delete_skipped_no_message');
+            break;
+          }
+          const key = ctx.raw?.key;
+          if (!key?.id) {
+            taken.push('delete_no_message');
+            break;
+          }
+          // Apagar mensagem de outro membro exige um chip ADMIN do grupo.
+          const adminResp = adminResponderFor(ctx.jid, allowed);
+          if (!adminResp) {
+            taken.push('delete_no_admin_chip');
+            break;
+          }
+          try {
+            await wa.accountDeleteMessage(adminResp, ctx.jid, key);
+            taken.push('delete_message');
+          } catch (e) {
+            taken.push('delete_failed');
+            console.error('[auto] apagar mensagem falhou:', e?.message);
+          }
+          break;
+        }
         case 'webhook': {
           if (cfg.url) {
             await postWebhook(cfg.url, cfg.secret, buildPayload(triggerType, rule, ctx, responder));
