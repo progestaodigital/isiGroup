@@ -152,6 +152,19 @@ export function createWhatsApp(db, sessionRootDir) {
     await rm(sessionDirFor(accountId), { recursive: true, force: true }).catch(() => {});
     db.exec('BEGIN;');
     try {
+      // Entradas de agendamento que apontam para GRUPOS deste chip
+      // (FK schedule_targets.target_id -> targets.id): removidas ANTES dos
+      // targets, senao o DELETE dos targets viola essa FK.
+      db.prepare(
+        'DELETE FROM schedule_targets WHERE target_id IN (SELECT id FROM targets WHERE account_id = ?)'
+      ).run(accountId);
+      // Demais referencias por account_id (FK -> accounts) sao DESVINCULADAS
+      // (viram NULL): preserva agendamentos/regras/logs e satisfaz a FK para o
+      // DELETE da conta nao falhar (NULL = conta primaria/desconhecida).
+      for (const t of ['schedule_targets', 'schedules', 'automation_rules', 'automation_logs']) {
+        db.prepare(`UPDATE ${t} SET account_id = NULL WHERE account_id = ?`).run(accountId);
+      }
+      // Grupos sincronizados deste chip.
       db.prepare('DELETE FROM targets WHERE account_id = ?').run(accountId);
       db.prepare('DELETE FROM accounts WHERE id = ?').run(accountId);
       db.exec('COMMIT;');
@@ -168,13 +181,19 @@ export function createWhatsApp(db, sessionRootDir) {
       .run(proxyUrl || null, enabled ? 1 : 0, accountId);
   }
 
-  // Lista de alvos de TODAS as contas (com account_id para cobertura).
+  // Lista de alvos para a UI: só de chips CONECTADOS. Um chip desconectado não
+  // mostra seus grupos em lugar nenhum do app (evita poluir com dados velhos de
+  // sessões que saíram) — reaparecem sozinhos ao reconectar.
   function listTargets() {
+    const connected = new Set(
+      [...sessions.entries()].filter(([, s]) => s.isConnected()).map(([id]) => id)
+    );
     return db
       .prepare(
         'SELECT id, account_id, jid, name, type, is_admin, last_synced_at FROM targets ORDER BY is_admin DESC, name COLLATE NOCASE'
       )
-      .all();
+      .all()
+      .filter((r) => r.account_id != null && connected.has(r.account_id));
   }
 
   return {
@@ -197,6 +216,29 @@ export function createWhatsApp(db, sessionRootDir) {
     accountRemoveParticipant: (id, jid, p) => getSession(id).removeParticipant(jid, p),
     accountIsParticipantAdmin: (id, jid, p) => getSession(id).isParticipantAdmin(jid, p),
     accountDeleteMessage: (id, jid, key) => getSession(id).deleteMessage(jid, key),
+    // --- Acoes em massa (bulk) por conta ---
+    accountAddParticipants: (id, jid, ps) => getSession(id).addParticipants(jid, ps),
+    accountPromoteParticipants: (id, jid, ps) => getSession(id).promoteParticipants(jid, ps),
+    accountDemoteParticipants: (id, jid, ps) => getSession(id).demoteParticipants(jid, ps),
+    accountGroupParticipants: (id, jid) => getSession(id).groupParticipants(jid),
+    accountResolveGroupMembers: (id, jid, phones) => getSession(id).resolveGroupMembers(jid, phones),
+    accountSetSubject: (id, jid, s) => getSession(id).setSubject(jid, s),
+    accountSetDescription: (id, jid, d) => getSession(id).setDescription(jid, d),
+    accountSetGroupPicture: (id, jid, buf) => getSession(id).setGroupPicture(jid, buf),
+    accountSetGroupSetting: (id, jid, setting) => getSession(id).setGroupSetting(jid, setting),
+    accountSetMemberAddMode: (id, jid, mode) => getSession(id).setMemberAddMode(jid, mode),
+    accountSetJoinApproval: (id, jid, mode) => getSession(id).setJoinApproval(jid, mode),
+    accountOnWhatsApp: (id, phones) => getSession(id).onWhatsApp(phones),
+    // Menor chip CONECTADO que e admin do grupo (executa as acoes em massa).
+    adminAccountForGroup: (jid) => {
+      const rows = db
+        .prepare('SELECT account_id FROM targets WHERE jid = ? AND is_admin = 1 ORDER BY account_id')
+        .all(jid);
+      for (const r of rows) {
+        if (r.account_id && getSession(r.account_id).isConnected()) return r.account_id;
+      }
+      return null;
+    },
     connectedAccountIds: () =>
       [...sessions.entries()].filter(([, s]) => s.isConnected()).map(([id]) => id),
 
@@ -399,7 +441,11 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
         state.status = 'disconnected';
         state.qr = null;
         db.prepare("UPDATE accounts SET status = 'disconnected' WHERE id = ?").run(accountId);
-        console.error(`[wa:${accountId}] sessao encerrada (logout).`);
+        // Sessao morta (aparelho desvinculado no WhatsApp): apaga as credenciais
+        // invalidas para que o proximo "Conectar" gere um QR NOVO em vez de
+        // reusar a sessao morta (que o servidor rejeita sem emitir QR).
+        rm(sessionDir, { recursive: true, force: true }).catch(() => {});
+        console.error(`[wa:${accountId}] sessao encerrada (logout) — credenciais limpas p/ novo QR.`);
       } else {
         state.status = 'connecting';
         reconnectAttempts += 1;
@@ -659,9 +705,182 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
     return !!p && (p.admin === 'admin' || p.admin === 'superadmin');
   }
 
+  // --- Acoes em massa (bulk): operacoes de grupo/participantes ---
+  // Requerem admin (regra do WhatsApp). Retornam o resultado cru da Baileys.
+
+  // Adiciona participantes (por jid <telefone>@s.whatsapp.net). Retorna a lista
+  // de status por participante ([{ status, jid }]) — o chamador interpreta.
+  async function addParticipants(jid, participants) {
+    if (!isConnected()) throw new Error('WhatsApp nao conectado');
+    return sock.groupParticipantsUpdate(jid, participants, 'add');
+  }
+  async function promoteParticipants(jid, participants) {
+    if (!isConnected()) throw new Error('WhatsApp nao conectado');
+    return sock.groupParticipantsUpdate(jid, participants, 'promote');
+  }
+  async function demoteParticipants(jid, participants) {
+    if (!isConnected()) throw new Error('WhatsApp nao conectado');
+    return sock.groupParticipantsUpdate(jid, participants, 'demote');
+  }
+  // Participantes atuais do grupo (para mapear telefone -> id do membro).
+  async function groupParticipants(jid) {
+    if (!isConnected()) throw new Error('WhatsApp nao conectado');
+    const md = await sock.groupMetadata(jid);
+    return md.participants ?? [];
+  }
+
+  // Resolve telefones -> id do participante DENTRO do grupo, contornando o @lid.
+  // Retorna { [telefone]: idDoParticipante | null }. Estrategia:
+  //  1) casa pelo phoneNumber da metadata (quando o WhatsApp entrega);
+  //  2) para os que faltarem, usa o mapa PN->LID do Baileys (getLIDsForPNs) e
+  //     casa pelo LID — porque em grupos @lid o participante NAO traz o telefone.
+  async function resolveGroupMembers(jid, phones) {
+    if (!isConnected()) throw new Error('WhatsApp nao conectado');
+    const md = await sock.groupMetadata(jid);
+    const parts = md.participants ?? [];
+    const store = sock.signalRepository?.lidMapping;
+
+    const byPhone = new Map(); // telefone(digitos) -> id do participante
+    const byLidUser = new Map(); // usuario do lid (sem device) -> id do participante
+
+    // (1) direto da metadata: phoneNumber e lid de cada participante.
+    for (const p of parts) {
+      const id = p.id ?? p.jid ?? p.lid;
+      if (!id) continue;
+      const ph =
+        digitsOnly(p.phoneNumber) ||
+        (typeof p.jid === 'string' && p.jid.includes('@s.whatsapp.net') ? digitsOnly(p.jid) : null) ||
+        (typeof p.id === 'string' && p.id.includes('@s.whatsapp.net') ? digitsOnly(p.id) : null);
+      if (ph) for (const v of phoneVariants(ph)) if (!byPhone.has(v)) byPhone.set(v, id);
+      const lu = lidUserOf(p.lid) ?? lidUserOf(p.id);
+      if (lu && !byLidUser.has(lu)) byLidUser.set(lu, id);
+    }
+
+    // (2) reverso (LID -> telefone) para participantes @lid sem telefone: o
+    // participante ja e conhecido pela sessao, entao esse mapa costuma resolver.
+    if (store?.getPNForLID) {
+      for (const p of parts) {
+        const id = p.id ?? p.jid ?? p.lid;
+        const lidJid =
+          typeof p.lid === 'string' && p.lid.includes('@lid') ? p.lid
+          : typeof p.id === 'string' && p.id.includes('@lid') ? p.id
+          : null;
+        if (!id || !lidJid) continue;
+        try {
+          const d = digitsOnly(await store.getPNForLID(lidJid));
+          if (d) for (const v of phoneVariants(d)) if (!byPhone.has(v)) byPhone.set(v, id);
+        } catch { /* ignora */ }
+      }
+    }
+
+    const lookup = (d) => {
+      if (!d) return null;
+      for (const v of phoneVariants(d)) if (byPhone.has(v)) return byPhone.get(v);
+      return null;
+    };
+
+    const out = {};
+    const pending = [];
+    for (const phone of phones) {
+      const d = digitsOnly(phone);
+      const matched = lookup(d);
+      out[phone] = matched;
+      if (!matched && d) pending.push({ phone, d });
+    }
+
+    // Casa um telefone (com variantes do 9o digito) contra um mapa pnUser->lidUser.
+    const luFrom = (map, d) => {
+      for (const v of phoneVariants(d)) {
+        const lu = map.get(v);
+        if (lu) return lu;
+      }
+      return null;
+    };
+
+    // (3) direto (telefone -> LID) para os que ainda faltaram.
+    if (pending.length && store?.getLIDsForPNs) {
+      try {
+        const mappings = await store.getLIDsForPNs(pending.map((x) => `${x.d}@s.whatsapp.net`));
+        const lidByPn = new Map();
+        for (const m of mappings ?? []) {
+          const pnUser = digitsOnly(m.pn);
+          const lu = lidUserOf(m.lid);
+          if (pnUser && lu) lidByPn.set(pnUser, lu);
+        }
+        for (const it of pending) {
+          if (out[it.phone]) continue;
+          const lu = luFrom(lidByPn, it.d);
+          if (lu && byLidUser.has(lu)) out[it.phone] = byLidUser.get(lu);
+        }
+      } catch (e) {
+        console.error(`[wa:${accountId}] PN->LID falhou: ${e?.message}`);
+      }
+    }
+
+    // (4) fallback: onWhatsApp resolve o telefone no servidor (pode trazer lid).
+    const stillPending = pending.filter((x) => !out[x.phone]);
+    if (stillPending.length) {
+      try {
+        const res = (await sock.onWhatsApp(...stillPending.map((x) => `${x.d}@s.whatsapp.net`))) ?? [];
+        const luByPn = new Map();
+        for (const r of res) {
+          const pnUser = digitsOnly(r?.jid);
+          const lu = lidUserOf(r?.lid);
+          if (pnUser && lu) luByPn.set(pnUser, lu);
+        }
+        for (const it of stillPending) {
+          const lu = luFrom(luByPn, it.d);
+          if (lu && byLidUser.has(lu)) out[it.phone] = byLidUser.get(lu);
+        }
+      } catch (e) {
+        console.error(`[wa:${accountId}] onWhatsApp falhou: ${e?.message}`);
+      }
+    }
+
+    const okN = Object.values(out).filter(Boolean).length;
+    console.error(`[wa:${accountId}] resolveGroupMembers ${jid}: ${okN}/${phones.length} encontrados`);
+    return out;
+  }
+  async function setSubject(jid, subject) {
+    if (!isConnected()) throw new Error('WhatsApp nao conectado');
+    return sock.groupUpdateSubject(jid, subject);
+  }
+  async function setDescription(jid, description) {
+    if (!isConnected()) throw new Error('WhatsApp nao conectado');
+    return sock.groupUpdateDescription(jid, description);
+  }
+  async function setGroupPicture(jid, buffer) {
+    if (!isConnected()) throw new Error('WhatsApp nao conectado');
+    return sock.updateProfilePicture(jid, buffer); // Baileys reamostra com sharp
+  }
+  // setting: 'announcement'|'not_announcement'|'locked'|'unlocked'
+  async function setGroupSetting(jid, setting) {
+    if (!isConnected()) throw new Error('WhatsApp nao conectado');
+    return sock.groupSettingUpdate(jid, setting);
+  }
+  // mode: 'admin_add'|'all_member_add'
+  async function setMemberAddMode(jid, mode) {
+    if (!isConnected()) throw new Error('WhatsApp nao conectado');
+    return sock.groupMemberAddMode(jid, mode);
+  }
+  // mode: 'on'|'off'
+  async function setJoinApproval(jid, mode) {
+    if (!isConnected()) throw new Error('WhatsApp nao conectado');
+    return sock.groupJoinApprovalMode(jid, mode);
+  }
+  // Checa em quais numeros o WhatsApp existe: [{ jid, exists }].
+  async function onWhatsApp(phones) {
+    if (!isConnected()) throw new Error('WhatsApp nao conectado');
+    return (await sock.onWhatsApp(...phones)) ?? [];
+  }
+
   return {
     start, logout, getState, syncTargets, sendContent, isConnected,
     replyText, sendDirect, removeParticipant, isParticipantAdmin, deleteMessage,
+    addParticipants, promoteParticipants, demoteParticipants, groupParticipants,
+    resolveGroupMembers,
+    setSubject, setDescription, setGroupPicture, setGroupSetting, setMemberAddMode,
+    setJoinApproval, onWhatsApp,
   };
 }
 
@@ -762,6 +981,31 @@ function digitsOnly(x) {
   const user = String(x).split('@')[0].split(':')[0];
   const d = user.replace(/\D/g, '');
   return d || null;
+}
+
+// Usuario numerico de um id @lid (sem device/sufixo). null se nao for @lid.
+function lidUserOf(x) {
+  if (typeof x !== 'string' || !x.includes('@lid')) return null;
+  const user = x.split('@')[0].split(':')[0].split('.')[0];
+  return user || null;
+}
+
+// Variantes de um telefone para o 9o digito brasileiro. O WhatsApp costuma
+// guardar celulares antigos SEM o 9 (55+DDD+8 digitos), enquanto o usuario
+// digita COM o 9 (55+DDD+9+8). Retorna o numero + a forma alternativa, para o
+// casamento telefone<->participante funcionar nos dois formatos.
+function phoneVariants(d) {
+  if (!d) return [];
+  const out = new Set([d]);
+  if (d.startsWith('55')) {
+    const rest = d.slice(2); // DDD + assinante
+    if (rest.length === 11 && rest[2] === '9') {
+      out.add('55' + rest.slice(0, 2) + rest.slice(3)); // com 9 -> sem 9
+    } else if (rest.length === 10) {
+      out.add('55' + rest.slice(0, 2) + '9' + rest.slice(2)); // sem 9 -> com 9
+    }
+  }
+  return [...out];
 }
 
 function hasAllMention(text) {

@@ -11,6 +11,7 @@ import { createWhatsApp } from './src/whatsapp.mjs';
 import { createScheduler } from './src/scheduler.mjs';
 import { saveUpload } from './src/media.mjs';
 import { createAutomation } from './src/automation.mjs';
+import { createBulk } from './src/bulk.mjs';
 
 // Nome/versão vêm do package.json (copiado ao lado deste módulo no bundle),
 // para o /health nunca defasar em relação à versão real publicada.
@@ -53,6 +54,10 @@ const editionState = { edition: 'free' };
 const automation = createAutomation(db, wa, editionState);
 wa.setMessageHandler(automation.onMessage);
 wa.setMembershipHandler(automation.onMembership);
+
+// Acoes em massa (bulk): fila propria no SQLite, retomada no arranque.
+const bulk = createBulk(db, wa);
+bulk.start();
 
 // Reconexao automatica no arranque: religa todas as contas (chips) com sessao
 // salva — sem precisar clicar em "Conectar" nem reescanear o QR.
@@ -318,6 +323,29 @@ async function route(req, res, url) {
   if (method === 'PUT' && ruleUpd) return updateRule(res, Number(ruleUpd[1]), await readJson(req));
   const ruleDel = path.match(/^\/automation\/rules\/(\d+)$/);
   if (method === 'DELETE' && ruleDel) return deleteRule(res, Number(ruleDel[1]));
+
+  // --- Acoes em massa (bulk) ---
+  if (match('POST', '/bulk')) {
+    const b = await readJson(req);
+    const r = bulk.enqueue({ op: b?.op, groups: b?.groups, contacts: b?.contacts, params: b?.params, run_at: b?.run_at });
+    if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
+    return json(res, 201, { id: r.id, scheduled: r.scheduled, run_at: r.run_at });
+  }
+  if (match('GET', '/bulk')) {
+    return json(res, 200, { jobs: bulk.list() });
+  }
+  const bulkDetail = path.match(/^\/bulk\/(\d+)$/);
+  if (method === 'GET' && bulkDetail) {
+    const d = bulk.detail(Number(bulkDetail[1]));
+    if (!d) return json(res, 404, { error: 'not_found' });
+    return json(res, 200, d);
+  }
+  const bulkCancel = path.match(/^\/bulk\/(\d+)\/cancel$/);
+  if (method === 'POST' && bulkCancel) {
+    const r = bulk.cancel(Number(bulkCancel[1]));
+    if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    return json(res, 200, { ok: true });
+  }
 
   return json(res, 404, { error: 'not_found' });
 }

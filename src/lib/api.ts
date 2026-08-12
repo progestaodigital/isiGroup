@@ -491,3 +491,79 @@ export const cancelSchedule = (id: number) =>
   sidecar<{ ok?: boolean; error?: string }>(`/schedules/${id}/cancel`, {
     method: "POST",
   });
+
+// --- Ações em massa (bulk) ---
+export type BulkOp =
+  | "add_members"
+  | "remove_members"
+  | "promote"
+  | "demote"
+  | "set_name"
+  | "set_description"
+  | "set_picture"
+  | "set_settings"
+  | "set_group"; // ação combinada (nome/descrição/imagem/config numa só)
+
+export type BulkPace = "slow" | "normal" | "fast";
+
+export interface BulkSettings {
+  announce?: "all" | "admins"; // quem envia mensagens
+  edit?: "all" | "admins"; // quem edita dados do grupo
+  add?: "all" | "admins"; // quem adiciona membros
+  approval?: "on" | "off"; // aprovar novos membros
+}
+
+export interface BulkParams {
+  pace?: BulkPace;
+  name?: string;
+  description?: string;
+  media_path?: string;
+  settings?: BulkSettings;
+}
+
+export interface NewBulkJob {
+  op: BulkOp;
+  groups: Array<{ jid: string; name?: string }>;
+  contacts?: string[]; // só ações de membro
+  params?: BulkParams;
+  run_at?: string; // ISO — agenda a execução; ausente/passado = agora
+}
+
+export interface BulkJobRow {
+  id: number;
+  op: BulkOp;
+  status: "running" | "done" | "canceled" | "scheduled";
+  params: BulkParams;
+  total: number;
+  done: number;
+  ok: number;
+  failed: number;
+  skipped: number;
+  run_at: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
+export interface BulkJobItem {
+  group_jid: string;
+  group_name: string | null;
+  contact: string | null;
+  status: "pending" | "ok" | "failed" | "skipped";
+  detail: string | null;
+  account_id: number | null;
+}
+
+export interface BulkJobDetail {
+  job: BulkJobRow;
+  items: BulkJobItem[];
+}
+
+export const createBulkJob = (b: NewBulkJob) =>
+  sidecar<{ id?: number; scheduled?: boolean; run_at?: string | null; error?: string; message?: string }>("/bulk", {
+    method: "POST",
+    ...jbody(b),
+  });
+export const listBulkJobs = () => sidecar<{ jobs: BulkJobRow[] }>("/bulk");
+export const getBulkJob = (id: number) => sidecar<BulkJobDetail>(`/bulk/${id}`);
+export const cancelBulkJob = (id: number) =>
+  sidecar<{ ok?: boolean }>(`/bulk/${id}/cancel`, { method: "POST" });
