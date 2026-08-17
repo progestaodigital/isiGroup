@@ -80,6 +80,10 @@ async fn revalidate_license(state: State<'_, AppState>) -> Result<LicenseState, 
 #[tauri::command]
 fn clear_license(state: State<AppState>) -> Result<LicenseState, String> {
     license::clear_key()?;
+    // Esquece o HWID fixado: ao reativar (nova maquina/hardware), o proximo
+    // arranque re-detecta e fixa de novo. Na mesma maquina, a re-deteccao gera o
+    // mesmo valor. Escape hatch para troca real de hardware.
+    hwid::clear_pin();
     let st = LicenseState::no_key();
     *state.license.lock().map_err(|_| "estado bloqueado")? = st.clone();
     Ok(st)
@@ -181,8 +185,9 @@ fn gen_token() -> String {
 /// Inicializacao pesada do arranque (em segundo plano): HWID, sidecar e boot ping.
 /// Ao terminar, preenche o AppState — a UI sai do estado "carregando".
 fn init_background(handle: &tauri::AppHandle) -> Result<(), String> {
-    let hwid = hwid::compute_hwid();
-    eprintln!("[core] hwid {}", hwid::mask_hwid(&hwid));
+    // HWID estavel: usa o valor FIXADO no keyring se existir; senao le o hardware
+    // e fixa (write-once). Imune a ruido de leitura entre fechar/abrir o app.
+    let hwid = hwid::resolve_hwid();
 
     let data_dir = strip_verbatim(
         handle

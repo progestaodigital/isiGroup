@@ -41,6 +41,35 @@ const silentLogger = {
 };
 
 const MAX_BACKOFF_MS = 30_000;
+// Quedas seguidas antes de PARAR de reconectar e expor o motivo na UI, em vez de
+// ficar "Estabelecendo conexao" para sempre (tipico de rede/firewall/AV bloqueando
+// os servidores do WhatsApp). O usuario ve o erro e pode tentar de novo.
+const MAX_RECONNECT_ATTEMPTS = 5;
+// Teto para a busca da versao do WhatsApp Web. Ver fetchWaVersion abaixo.
+const VERSION_FETCH_TIMEOUT_MS = 5_000;
+
+/// Busca a versao mais recente do WhatsApp Web, mas com TIMEOUT CURTO e sem nunca
+/// pendurar o start(). fetchLatestBaileysVersion() bate em raw.githubusercontent.com
+/// SEM timeout proprio; em redes que bloqueiam/estrangulam o GitHub (firewall
+/// corporativo, antivirus com inspecao, alguns provedores) esse fetch fica preso e
+/// trava a conexao ANTES de criar o socket — a UI fica em "Estabelecendo conexao"
+/// e o QR nunca aparece (limpar a sessao nao resolve, pois o bloqueio e anterior).
+/// Ao estourar o timeout (ou falhar), caimos para a versao EMBUTIDA do Baileys
+/// (version: undefined), que faz a conexao seguir normalmente.
+async function fetchWaVersion() {
+  let timer;
+  try {
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('timeout')), VERSION_FETCH_TIMEOUT_MS);
+    });
+    const { version } = await Promise.race([fetchLatestBaileysVersion(), timeout]);
+    return version;
+  } catch {
+    return undefined; // usa a versao embutida do Baileys
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // ===========================================================================
 //  POOL — gerencia N sessoes (chips). API single-chip delega para a primaria.
@@ -131,6 +160,7 @@ export function createWhatsApp(db, sessionRootDir) {
           status: st?.status ?? a.status ?? 'disconnected',
           qr: st?.qr ?? null,
           me: st?.me ?? null,
+          last_error: st?.last_error ?? null,
           groups,
           admin_groups: admin,
         };
@@ -301,7 +331,8 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
     try {
       mkdirSync(sessionDir, { recursive: true });
       const { state: authState, saveCreds } = await useMultiFileAuthState(sessionDir);
-      const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: undefined }));
+      // Nunca pendura: timeout curto + fallback para a versao embutida (ver fetchWaVersion).
+      const version = await fetchWaVersion();
 
       sock = makeWASocket({
         version,
@@ -420,6 +451,7 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
       reconnectAttempts = 0;
       state.status = 'connected';
       state.qr = null;
+      state.last_error = null;
       const credsMe = sock.authState?.creds?.me ?? {};
       const rawLid = sock.user?.lid ?? credsMe.lid ?? null;
       state.me = {
@@ -434,23 +466,36 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
       const loggedOut = code === DisconnectReason.loggedOut;
+      const badSession = code === DisconnectReason.badSession;
       state.me = null;
       sock = null;
 
-      if (loggedOut) {
+      if (loggedOut || badSession) {
+        // Credenciais inutilizaveis — aparelho desvinculado (logout) OU sessao
+        // corrompida (badSession). Apaga o wa-session para o proximo "Conectar"
+        // gerar um QR NOVO, em vez de reusar creds mortas que o servidor rejeita
+        // sem emitir QR (ficaria "connecting" eterno). badSession antes so caia no
+        // else e reconectava recarregando as MESMAS creds ruins — loop sem QR.
         state.status = 'disconnected';
         state.qr = null;
+        reconnectAttempts = 0;
         db.prepare("UPDATE accounts SET status = 'disconnected' WHERE id = ?").run(accountId);
-        // Sessao morta (aparelho desvinculado no WhatsApp): apaga as credenciais
-        // invalidas para que o proximo "Conectar" gere um QR NOVO em vez de
-        // reusar a sessao morta (que o servidor rejeita sem emitir QR).
         rm(sessionDir, { recursive: true, force: true }).catch(() => {});
-        console.error(`[wa:${accountId}] sessao encerrada (logout) — credenciais limpas p/ novo QR.`);
+        const motivo = loggedOut ? 'logout' : 'sessao corrompida (badSession)';
+        console.error(`[wa:${accountId}] ${motivo} — credenciais limpas p/ novo QR.`);
+      } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        // Nao reconecta em silencio para sempre: para e mostra o motivo na UI.
+        state.status = 'disconnected';
+        state.qr = null;
+        state.last_error = `Não foi possível conectar após ${MAX_RECONNECT_ATTEMPTS} tentativas (code ${code ?? '?'}). Verifique internet, firewall ou antivírus.`;
+        reconnectAttempts = 0;
+        db.prepare("UPDATE accounts SET status = 'disconnected' WHERE id = ?").run(accountId);
+        console.error(`[wa:${accountId}] desisti apos ${MAX_RECONNECT_ATTEMPTS} tentativas (code ${code}).`);
       } else {
         state.status = 'connecting';
         reconnectAttempts += 1;
         const delay = Math.min(MAX_BACKOFF_MS, 1000 * 2 ** reconnectAttempts);
-        console.error(`[wa:${accountId}] queda (code ${code}); reconectando em ${delay}ms`);
+        console.error(`[wa:${accountId}] queda (code ${code}); reconectando em ${delay}ms (tentativa ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
         clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(() => start(), delay);
       }

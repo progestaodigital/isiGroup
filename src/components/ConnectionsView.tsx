@@ -240,6 +240,9 @@ function ChipCard({
         </div>
       )}
       {s === "connecting" && <p className="muted">Estabelecendo conexão…</p>}
+      {s === "disconnected" && account.last_error && (
+        <p className="small" style={{ color: "#e05a4f", marginTop: 4 }}>⚠ {account.last_error}</p>
+      )}
       {account.proxy_enabled && account.proxy_url && (
         <p className="hint">via proxy {account.proxy_url.replace(/\/\/.*@/, "//")}</p>
       )}

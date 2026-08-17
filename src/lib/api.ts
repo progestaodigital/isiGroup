@@ -171,6 +171,7 @@ export interface Account {
   status: ConnStatus;
   qr: string | null;
   me: { jid: string; lid?: string | null; name: string | null } | null;
+  last_error: string | null;
   groups: number;
   admin_groups: number;
 }
