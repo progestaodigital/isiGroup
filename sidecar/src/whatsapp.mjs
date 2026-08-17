@@ -11,6 +11,7 @@ import QRCode from 'qrcode';
 import {
   mkdirSync,
   writeFileSync,
+  readFileSync,
   existsSync,
   readdirSync,
   statSync,
@@ -47,28 +48,65 @@ const MAX_BACKOFF_MS = 30_000;
 const MAX_RECONNECT_ATTEMPTS = 5;
 // Teto para a busca da versao do WhatsApp Web. Ver fetchWaVersion abaixo.
 const VERSION_FETCH_TIMEOUT_MS = 5_000;
+// Versao conhecida-boa do WhatsApp Web, capturada em 2026-08-17. FALLBACK quando
+// nao da para buscar a mais recente (rede que bloqueia o GitHub). NAO usar a versao
+// EMBUTIDA do Baileys 7.0.0-rc13 ([2,3000,1035194821]) como fallback: ela ja e
+// REJEITADA pelo WhatsApp (code 405 Connection Failure) — era isso que deixava o
+// chip sem QR em redes que bloqueiam o raw.githubusercontent.com. E `version:
+// undefined` faz o makeWASocket quebrar (lê `.join` de undefined). Rebumpar esta
+// constante quando o WhatsApp parar de aceita-la.
+export const FALLBACK_WA_VERSION = [2, 3000, 1043857760];
+const WA_VERSION_CACHE_FILE = 'wa-web-version.json';
 
-/// Busca a versao mais recente do WhatsApp Web, mas com TIMEOUT CURTO e sem nunca
-/// pendurar o start(). fetchLatestBaileysVersion() bate em raw.githubusercontent.com
-/// SEM timeout proprio; em redes que bloqueiam/estrangulam o GitHub (firewall
-/// corporativo, antivirus com inspecao, alguns provedores) esse fetch fica preso e
-/// trava a conexao ANTES de criar o socket — a UI fica em "Estabelecendo conexao"
-/// e o QR nunca aparece (limpar a sessao nao resolve, pois o bloqueio e anterior).
-/// Ao estourar o timeout (ou falhar), caimos para a versao EMBUTIDA do Baileys
-/// (version: undefined), que faz a conexao seguir normalmente.
-async function fetchWaVersion() {
+function isValidWaVersion(v) {
+  return Array.isArray(v) && v.length === 3 && v.every((n) => Number.isInteger(n));
+}
+
+function readCachedWaVersion(cachePath) {
+  if (!cachePath || !existsSync(cachePath)) return null;
+  try {
+    const v = JSON.parse(readFileSync(cachePath, 'utf8'));
+    return isValidWaVersion(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/// Resolve a versao do WhatsApp Web a passar ao makeWASocket. SEMPRE retorna uma
+/// versao valida [x,y,z] — nunca undefined (que quebra o makeWASocket).
+///   1. Tenta a mais recente via fetchLatestBaileysVersion, com TIMEOUT CURTO (ela
+///      bate em raw.githubusercontent.com SEM timeout proprio; em redes que bloqueiam
+///      o GitHub isso penduraria o start() ANTES de criar o socket). Deu certo =>
+///      usa e guarda como "ultima versao boa" (cache) p/ aberturas offline futuras.
+///   2. Falhou/timeout => usa a ultima versao boa cacheada, se houver.
+///   3. Sem cache => usa a FALLBACK_WA_VERSION embutida no app (conhecida-boa).
+export async function fetchWaVersion(cacheDir) {
+  const cachePath = cacheDir ? join(cacheDir, WA_VERSION_CACHE_FILE) : null;
   let timer;
   try {
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('timeout')), VERSION_FETCH_TIMEOUT_MS);
     });
-    const { version } = await Promise.race([fetchLatestBaileysVersion(), timeout]);
-    return version;
+    const res = await Promise.race([fetchLatestBaileysVersion(), timeout]);
+    // ATENCAO: fetchLatestBaileysVersion ENGOLE os proprios erros de rede e devolve
+    // a versao EMBUTIDA (stale, rejeitada com 405) marcada com `isLatest:false` —
+    // nao lanca. Por isso so confiamos no resultado quando `isLatest === true` (fetch
+    // real bem-sucedido); caso contrario ignoramos e usamos nosso cache/fallback.
+    if (res?.isLatest && isValidWaVersion(res.version)) {
+      if (cachePath) {
+        try { writeFileSync(cachePath, JSON.stringify(res.version)); } catch { /* cache best-effort */ }
+      }
+      return res.version;
+    }
   } catch {
-    return undefined; // usa a versao embutida do Baileys
+    /* timeout — cai para cache/fallback abaixo */
   } finally {
     clearTimeout(timer);
   }
+  const cached = readCachedWaVersion(cachePath);
+  const chosen = cached ?? FALLBACK_WA_VERSION;
+  console.error(`[wa] versao WhatsApp Web offline — usando ${cached ? 'cache' : 'fallback'} ${JSON.stringify(chosen)}`);
+  return chosen;
 }
 
 // ===========================================================================
@@ -331,8 +369,9 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
     try {
       mkdirSync(sessionDir, { recursive: true });
       const { state: authState, saveCreds } = await useMultiFileAuthState(sessionDir);
-      // Nunca pendura: timeout curto + fallback para a versao embutida (ver fetchWaVersion).
-      const version = await fetchWaVersion();
+      // Nunca pendura e nunca retorna versao invalida: timeout curto + cache +
+      // fallback conhecido-bom (ver fetchWaVersion). Cache fica na raiz do wa-session.
+      const version = await fetchWaVersion(dirname(sessionDir));
 
       sock = makeWASocket({
         version,
