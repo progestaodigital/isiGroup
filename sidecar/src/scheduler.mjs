@@ -322,18 +322,19 @@ export function createScheduler(db, wa) {
     db.prepare('UPDATE schedules SET status = ? WHERE id = ?').run(status, scheduleId);
   }
 
-  // Envio de sequencia: cada passo vai para todos os alvos; entre passos,
-  // espera uma janela aleatoria (step_min_s..step_max_s).
+  // Envio de sequencia POR GRUPO: cada alvo recebe a sequencia COMPLETA
+  // (passos 1..N, com a janela step_min_s..step_max_s entre passos) antes de
+  // o disparo passar ao proximo grupo. Entre grupos, o espacamento anti-flood.
   // Resumability (#7): `seq_step` por alvo guarda o ultimo passo enviado; numa
   // queda, ao re-rodar, cada alvo retoma de onde parou (sem reenviar passos).
   async function sendSequence(scheduleId, schedule, targets, steps, chipFor) {
     const minMs = (schedule.step_min_s ?? 0) * 1000;
     const maxMs = Math.max(minMs, (schedule.step_max_s ?? schedule.step_min_s ?? 0) * 1000);
+    const stepWait = () => minMs + Math.floor(Math.random() * Math.max(1, maxMs - minMs + 1));
     const stats = { attempted: 0, sent: 0, failed: 0, skipped: 0, deferred: 0 };
     const failed = {}; // target.id -> erro
     const stuck = new Set(); // alvos cujo chip caiu no meio -> seguem 'pending'
     const skipped = new Set(); // alvos pulados no roteamento (ja marcados no DB)
-    const bufCache = new Map(); // media_path -> Buffer (le cada arquivo so uma vez)
     // Cada alvo usa um unico chip em toda a sequencia (resolvido uma vez).
     const chipByTarget = {};
     targets.forEach((t, i) => {
@@ -353,9 +354,10 @@ export function createScheduler(db, wa) {
     // Nada a enviar (tudo pulado/adiado): sai sem gastar as esperas entre passos.
     if (targets.every((t) => skipped.has(t.id) || stuck.has(t.id))) return stats;
 
-    for (let s = 0; s < steps.length; s++) {
-      const step = steps[s];
-      // Le a midia do passo (imagem/audio/video), com cache por caminho.
+    // Le a midia de cada passo (imagem/audio/video) uma unica vez, com cache
+    // por caminho, e monta o conteudo reutilizado em todos os grupos.
+    const bufCache = new Map(); // media_path -> Buffer
+    const contents = steps.map((step) => {
       let mediaBuffer = null;
       if (step.media_path) {
         if (!bufCache.has(step.media_path)) {
@@ -368,36 +370,44 @@ export function createScheduler(db, wa) {
         }
         mediaBuffer = bufCache.get(step.media_path);
       }
-      const content = buildStepContent(step, mediaBuffer);
+      return buildStepContent(step, mediaBuffer);
+    });
 
-      for (let i = 0; i < targets.length; i++) {
-        const tgt = targets[i];
-        if (failed[tgt.id] || stuck.has(tgt.id) || skipped.has(tgt.id)) continue;
+    for (let i = 0; i < targets.length; i++) {
+      const tgt = targets[i];
+      if (stuck.has(tgt.id) || skipped.has(tgt.id)) continue;
+      const acct = chipByTarget[tgt.id];
+      let sentAny = false; // enviou algum passo a este grupo nesta execucao?
+
+      for (let s = 0; s < steps.length; s++) {
         if (s < (tgt.seq_step || 0)) continue; // passo ja enviado a este alvo (retomada)
-        const acct = chipByTarget[tgt.id];
+        // Intervalo entre mensagens do MESMO grupo (nao antes da primeira).
+        if (sentAny) {
+          const wait = stepWait();
+          console.error(`[sched] seq #${scheduleId}: aguardando ${Math.round(wait / 1000)}s ate o passo ${s + 1} -> ${tgt.name || tgt.jid}`);
+          await sleep(wait);
+        }
         stats.attempted++;
         try {
-          await sendWithRetry(acct, tgt.jid, content);
+          await sendWithRetry(acct, tgt.jid, contents[s]);
           db.prepare('UPDATE schedule_targets SET seq_step = ? WHERE id = ?').run(s + 1, tgt.id);
           tgt.seq_step = s + 1;
+          sentAny = true;
           console.error(`[sched] seq #${scheduleId} passo ${s + 1}/${steps.length}${acct ? ` [chip ${acct}]` : ''} -> ${tgt.name || tgt.jid}`);
         } catch (e) {
           if (!isReachable(acct)) {
             console.error(`[sched] chip indisponivel na sequencia #${scheduleId}; mantendo pendente`);
-            stuck.add(tgt.id); // segue 'pending' -> retomado no mesmo dia quando reconectar
+            stuck.add(tgt.id); // segue 'pending' -> retomado quando reconectar (seq_step preserva o progresso)
             stats.deferred++;
-            continue;
+          } else {
+            failed[tgt.id] = e?.message ?? 'erro';
           }
-          failed[tgt.id] = e?.message ?? 'erro';
+          break; // interrompe a sequencia deste grupo; segue para o proximo
         }
-        if (i < targets.length - 1) await sleep(jitter());
       }
-      // Intervalo entre mensagens (nao apos a ultima).
-      if (s < steps.length - 1) {
-        const wait = minMs + Math.floor(Math.random() * Math.max(1, maxMs - minMs + 1));
-        console.error(`[sched] seq #${scheduleId}: aguardando ${Math.round(wait / 1000)}s ate o proximo passo`);
-        await sleep(wait);
-      }
+
+      // Espacamento anti-flood entre grupos (nao apos o ultimo).
+      if (sentAny && i < targets.length - 1) await sleep(jitter());
     }
 
     // Marca status final por alvo (sequencia concluida). seq_step volta a 0.
