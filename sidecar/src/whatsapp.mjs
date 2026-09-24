@@ -285,6 +285,7 @@ export function createWhatsApp(db, sessionRootDir) {
     accountIsParticipantAdmin: (id, jid, p) => getSession(id).isParticipantAdmin(jid, p),
     accountDeleteMessage: (id, jid, key) => getSession(id).deleteMessage(jid, key),
     // --- Acoes em massa (bulk) por conta ---
+    accountCreateGroup: (id, subject, ps) => getSession(id).createGroup(subject, ps),
     accountAddParticipants: (id, jid, ps) => getSession(id).addParticipants(jid, ps),
     accountPromoteParticipants: (id, jid, ps) => getSession(id).promoteParticipants(jid, ps),
     accountDemoteParticipants: (id, jid, ps) => getSession(id).demoteParticipants(jid, ps),
@@ -792,6 +793,14 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
   // --- Acoes em massa (bulk): operacoes de grupo/participantes ---
   // Requerem admin (regra do WhatsApp). Retornam o resultado cru da Baileys.
 
+  // Cria um grupo com os participantes iniciais (jids <telefone>@s.whatsapp.net).
+  // Retorna a metadata do grupo criado (inclui id e a lista de quem de fato
+  // entrou — contatos com privacidade restrita podem ficar de fora).
+  async function createGroup(subject, participants) {
+    if (!isConnected()) throw new Error('WhatsApp nao conectado');
+    return sock.groupCreate(subject, participants ?? []);
+  }
+
   // Adiciona participantes (por jid <telefone>@s.whatsapp.net). Retorna a lista
   // de status por participante ([{ status, jid }]) — o chamador interpreta.
   async function addParticipants(jid, participants) {
@@ -961,7 +970,7 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
   return {
     start, logout, getState, syncTargets, sendContent, isConnected,
     replyText, sendDirect, removeParticipant, isParticipantAdmin, deleteMessage,
-    addParticipants, promoteParticipants, demoteParticipants, groupParticipants,
+    createGroup, addParticipants, promoteParticipants, demoteParticipants, groupParticipants,
     resolveGroupMembers,
     setSubject, setDescription, setGroupPicture, setGroupSetting, setMemberAddMode,
     setJoinApproval, onWhatsApp,

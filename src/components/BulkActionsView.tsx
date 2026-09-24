@@ -29,6 +29,7 @@ const OP_LABEL: Record<BulkOp, string> = {
   promote: "Promover a admin",
   demote: "Rebaixar admin",
   set_group: "Editar grupos",
+  create_groups: "Criar grupos",
   // Legado (jobs antigos): não gerados pela UI atual, mantidos p/ exibição.
   set_name: "Trocar nome",
   set_description: "Trocar descrição",
@@ -105,7 +106,7 @@ export function BulkActionsView() {
       <div className="head-row">
         <div>
           <h1>Ações em massa</h1>
-          <p className="muted">Adicione/remova membros e edite vários grupos de uma vez.</p>
+          <p className="muted">Adicione/remova membros, edite e crie vários grupos de uma vez.</p>
         </div>
       </div>
 
@@ -113,7 +114,7 @@ export function BulkActionsView() {
         <b>⚠ Ações em massa têm alto risco de banimento.</b> Use com moderação.
       </div>
 
-      <BulkForm adminGroups={adminGroups} onCreated={refresh} />
+      <BulkForm adminGroups={adminGroups} accounts={accounts} onCreated={refresh} />
 
       <h2 className="section-title">Execuções</h2>
       <JobsList jobs={jobs} onChanged={refresh} />
@@ -123,14 +124,25 @@ export function BulkActionsView() {
 
 function BulkForm({
   adminGroups,
+  accounts,
   onCreated,
 }: {
   adminGroups: Target[];
+  accounts: Account[];
   onCreated: () => void;
 }) {
   const [op, setOp] = useState<BulkOp>("add_members");
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [contactsText, setContactsText] = useState("");
+
+  // Criação de grupos (op = create_groups): nome com {x} = numeração sequencial.
+  const [createAcct, setCreateAcct] = useState<number | null>(null);
+  const [createName, setCreateName] = useState("");
+  const [createQty, setCreateQty] = useState("1");
+  const [createStart, setCreateStart] = useState("1");
+  const [createDesc, setCreateDesc] = useState("");
+  const [adminsText, setAdminsText] = useState("");
+  const [membersText, setMembersText] = useState("");
 
   // Editor combinado de grupos (op = set_group): cada alteração é opcional.
   const [chName, setChName] = useState(false);
@@ -162,6 +174,30 @@ function BulkForm({
   }, [selected, adminGroups]);
 
   const isGroupEdit = op === "set_group";
+  const isCreate = op === "create_groups";
+
+  const connected = useMemo(() => accounts.filter((a) => a.status === "connected"), [accounts]);
+  // Chip criador: pré-seleciona o primeiro conectado (e corrige se o atual cair).
+  useEffect(() => {
+    if (connected.length && (createAcct == null || !connected.some((a) => a.id === createAcct))) {
+      setCreateAcct(connected[0].id);
+    }
+  }, [connected, createAcct]);
+
+  const createAdmins = useMemo(() => parseContacts(adminsText), [adminsText]);
+  const createMembers = useMemo(() => parseContacts(membersText), [membersText]);
+  const hasSeq = /\{x\}/i.test(createName);
+
+  // Prévia dos nomes gerados: "Turma 10, Turma 11, …, Turma 14".
+  const namePreview = useMemo(() => {
+    const nm = createName.trim();
+    const qty = parseInt(createQty, 10);
+    const start = parseInt(createStart, 10);
+    if (!nm || !hasSeq || !Number.isInteger(qty) || qty < 1 || !Number.isInteger(start)) return null;
+    const gen = (i: number) => nm.replace(/\{x\}/gi, String(start + i));
+    if (qty <= 4) return Array.from({ length: qty }, (_, i) => gen(i)).join(", ");
+    return `${gen(0)}, ${gen(1)}, ${gen(2)}, …, ${gen(qty - 1)}`;
+  }, [createName, createQty, createStart, hasSeq]);
 
   function chooseOp(next: BulkOp) {
     setOp(next);
@@ -211,7 +247,7 @@ function BulkForm({
     setErr(null);
     setNote(null);
 
-    if (groupJids.length === 0) return setErr("Selecione ao menos um grupo.");
+    if (!isCreate && groupJids.length === 0) return setErr("Selecione ao menos um grupo.");
 
     const params: BulkParams = { pace };
     let contactsPayload: string[] | undefined;
@@ -243,6 +279,31 @@ function BulkForm({
       }
       if (changes === 0) return setErr("Marque ao menos uma alteração (nome, descrição, imagem ou configurações).");
       if (chDesc && !newDesc.trim() && !confirm("A descrição está marcada e vazia — isso vai LIMPAR a descrição dos grupos. Continuar?")) return;
+    } else if (isCreate) {
+      if (createAcct == null || !connected.some((a) => a.id === createAcct)) {
+        return setErr("Escolha um chip conectado para criar os grupos.");
+      }
+      const nm = createName.trim();
+      if (!nm) return setErr("Informe o nome do grupo.");
+      const qty = parseInt(createQty, 10);
+      if (!Number.isInteger(qty) || qty < 1) return setErr("Quantidade de grupos inválida.");
+      if (qty > 30) return setErr("No máximo 30 grupos por disparo — divida em lotes menores.");
+      if (qty > 1 && !hasSeq) {
+        return setErr('Para criar vários grupos, use {x} no nome — ele vira o número sequencial (ex: "Turma {x}").');
+      }
+      let start = 1;
+      if (hasSeq) {
+        start = parseInt(createStart, 10);
+        if (!Number.isInteger(start) || start < 0) return setErr("Primeiro número inválido.");
+      }
+      params.account_id = createAcct;
+      params.name = nm;
+      params.quantity = qty;
+      params.start = start;
+      if (createDesc.trim()) params.description = createDesc;
+      if (picture) params.media_path = picture.stored_path;
+      if (createAdmins.length) params.admins = createAdmins;
+      if (createMembers.length) params.members = createMembers;
     }
 
     // Agendamento.
@@ -255,13 +316,20 @@ function BulkForm({
       run_at = t.toISOString();
     }
 
-    const opCount = isMemberOp(op) ? groupJids.length * (contactsPayload?.length ?? 0) : groupJids.length;
+    const opCount = isCreate
+      ? params.quantity ?? 1
+      : isMemberOp(op)
+        ? groupJids.length * (contactsPayload?.length ?? 0)
+        : groupJids.length;
     const whenTxt = run_at ? `agendada para ${new Date(run_at).toLocaleString("pt-BR")}` : "agora";
-    if (!confirm(`Confirmar "${OP_LABEL[op]}" — ${opCount} operação(ões) em ${groupJids.length} grupo(s), ${whenTxt}?`)) return;
+    const confirmMsg = isCreate
+      ? `Confirmar a criação de ${opCount} grupo(s), ${whenTxt}?`
+      : `Confirmar "${OP_LABEL[op]}" — ${opCount} operação(ões) em ${groupJids.length} grupo(s), ${whenTxt}?`;
+    if (!confirm(confirmMsg)) return;
 
     const payload: NewBulkJob = {
       op,
-      groups: groupJids.map((g) => ({ jid: g.jid, name: g.name })),
+      groups: isCreate ? [] : groupJids.map((g) => ({ jid: g.jid, name: g.name })),
       contacts: contactsPayload,
       params,
       run_at,
@@ -306,11 +374,28 @@ function BulkForm({
         </div>
       </div>
 
+      <div className="field">
+        <span>Grupos novos</span>
+        <div className="seg">
+          <button type="button" className={isCreate ? "on" : ""} onClick={() => chooseOp("create_groups")}>
+            Criar grupos (nome, descrição, imagem, admins, membros)
+          </button>
+        </div>
+      </div>
+
       {op === "add_members" && (
         <div className="alert danger soft">
           Adicionar pessoas em grupo é o maior causador de banimento. Não por ferramenta, mas por que
           as pessoas que não pediram para serem adicionadas ao grupo costumam reportar e isso gera o
           banimento do chip, ou até mesmo do grupo.
+        </div>
+      )}
+
+      {isCreate && createAdmins.length + createMembers.length > 0 && (
+        <div className="alert danger soft">
+          Os administradores e membros informados são adicionados aos grupos na criação. Quem não
+          pediu para entrar costuma denunciar — e isso pode banir o chip. Use listas pequenas, de
+          pessoas que esperam o convite.
         </div>
       )}
 
@@ -408,18 +493,143 @@ function BulkForm({
         </div>
       )}
 
-      {/* Seleção de grupos (todas as operações) */}
-      <div className="field">
-        <span>Grupos ({selected.size} selecionado{selected.size === 1 ? "" : "s"})</span>
-        {adminGroups.length === 0 ? (
-          <p className="muted small">
-            Nenhum grupo onde você é admin. Conecte um chip admin e sincronize os grupos primeiro (aba Conexão → Sincronizar grupos).
-          </p>
-        ) : (
-          <GroupPicker groups={adminGroups} selected={selected} onChange={setSelected} />
-        )}
-        <span className="hint">Só aparecem grupos onde algum chip conectado é admin (necessário para essas ações).</span>
-      </div>
+      {/* Criação de grupos */}
+      {isCreate && (
+        <div className="field">
+          <span>Dados dos novos grupos</span>
+
+          <div className="edit-section">
+            <span className="muted small">Chip que vai criar os grupos</span>
+            {connected.length === 0 ? (
+              <p className="muted small">Nenhum chip conectado. Conecte um chip primeiro (aba Conexão).</p>
+            ) : (
+              <div className="seg">
+                {connected.map((a) => (
+                  <button key={a.id} type="button" className={createAcct === a.id ? "on" : ""} onClick={() => setCreateAcct(a.id)}>
+                    {a.label || a.me?.name || `Chip ${a.id}`}
+                  </button>
+                ))}
+              </div>
+            )}
+            <span className="hint">O chip criador vira o dono (admin) dos grupos.</span>
+          </div>
+
+          <div className="edit-section">
+            <span className="muted small">Nome do grupo</span>
+            <input
+              value={createName}
+              onChange={(e) => setCreateName(e.currentTarget.value)}
+              maxLength={100}
+              placeholder="Ex: Turma {x}"
+            />
+            <span className="hint">
+              Use {"{x}"} no nome para numerar os grupos em sequência — cada grupo recebe o número seguinte.
+            </span>
+          </div>
+
+          <div className="edit-section">
+            <span className="muted small">Quantidade de grupos (máx. 30)</span>
+            <input
+              type="number"
+              min={1}
+              max={30}
+              value={createQty}
+              onChange={(e) => setCreateQty(e.currentTarget.value)}
+              style={{ maxWidth: 120 }}
+            />
+          </div>
+
+          {hasSeq && (
+            <div className="edit-section">
+              <span className="muted small">Primeiro número da sequência</span>
+              <input
+                type="number"
+                min={0}
+                value={createStart}
+                onChange={(e) => setCreateStart(e.currentTarget.value)}
+                style={{ maxWidth: 120 }}
+              />
+              {namePreview && <span className="hint">Serão criados: {namePreview}</span>}
+            </div>
+          )}
+
+          <div className="edit-section">
+            <span className="muted small">Descrição (opcional)</span>
+            <textarea
+              rows={3}
+              value={createDesc}
+              onChange={(e) => setCreateDesc(e.currentTarget.value)}
+              maxLength={2000}
+              placeholder="Texto da descrição dos grupos…"
+            />
+          </div>
+
+          <div className="edit-section">
+            <span className="muted small">Imagem do grupo (opcional)</span>
+            <div className="picker-tools">
+              <button type="button" className="link" onClick={() => fileRef.current?.click()} disabled={picBusy}>
+                {picBusy ? "Enviando…" : picture ? "Trocar imagem" : "Escolher imagem"}
+              </button>
+              {picName && <span className="muted small">{picName}</span>}
+              {picture && (
+                <button
+                  type="button"
+                  className="link subtle"
+                  onClick={() => {
+                    setPicture(null);
+                    setPicName("");
+                  }}
+                >
+                  Remover
+                </button>
+              )}
+            </div>
+            <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={onPictureFile} />
+            <span className="hint">A imagem é reamostrada para o formato do WhatsApp automaticamente.</span>
+          </div>
+
+          <div className="edit-section">
+            <span className="muted small">
+              Administradores ({createAdmins.length} válido{createAdmins.length === 1 ? "" : "s"}) — opcional
+            </span>
+            <textarea
+              rows={3}
+              value={adminsText}
+              onChange={(e) => setAdminsText(e.currentTarget.value)}
+              placeholder={"Um número por linha, com DDI+DDD. Ex:\n5511999998888"}
+            />
+            <span className="hint">Entram no grupo e são promovidos a admin logo após a criação.</span>
+          </div>
+
+          <div className="edit-section">
+            <span className="muted small">
+              Membros iniciais ({createMembers.length} válido{createMembers.length === 1 ? "" : "s"}) — opcional
+            </span>
+            <textarea
+              rows={4}
+              value={membersText}
+              onChange={(e) => setMembersText(e.currentTarget.value)}
+              placeholder={"Um número por linha, com DDI+DDD. Ex:\n5511999998888\n5521988887777"}
+            />
+            <span className="hint">Números com DDI (55) e DDD. Duplicados são removidos.</span>
+          </div>
+        </div>
+      )}
+
+      {/* Seleção de grupos (não vale para criação — os grupos ainda não existem) */}
+      {!isCreate && (
+        <div className="field">
+          <span>Grupos ({selected.size} selecionado{selected.size === 1 ? "" : "s"})</span>
+          {adminGroups.length === 0 ? (
+            <p className="muted small">
+              Nenhum grupo onde você é admin. Conecte um chip admin e sincronize os grupos primeiro (aba Conexão → Sincronizar grupos).
+            </p>
+          ) : (
+            <GroupPicker groups={adminGroups} selected={selected} onChange={setSelected} />
+          )}
+          <span className="hint">Só aparecem grupos onde algum chip conectado é admin (necessário para essas ações).</span>
+        </div>
+      )}
 
       {/* Ritmo (anti-flood) */}
       <div className="field">
@@ -450,7 +660,11 @@ function BulkForm({
       {note && <p className="hint">{note}</p>}
       <div className="gate-actions" style={{ justifyContent: "flex-start" }}>
         <button type="submit" disabled={busy}>
-          {busy ? "Enviando…" : when === "schedule" ? "Agendar ação" : "Executar ação em massa"}
+          {busy
+            ? "Enviando…"
+            : when === "schedule"
+              ? isCreate ? "Agendar criação" : "Agendar ação"
+              : isCreate ? "Criar grupos" : "Executar ação em massa"}
         </button>
       </div>
     </form>

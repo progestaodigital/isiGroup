@@ -5,6 +5,7 @@
 
 import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { rmSync, existsSync, readFileSync } from 'node:fs';
 import { openDatabase } from './src/db.mjs';
 import { createWhatsApp } from './src/whatsapp.mjs';
@@ -12,6 +13,9 @@ import { createScheduler } from './src/scheduler.mjs';
 import { saveUpload } from './src/media.mjs';
 import { createAutomation } from './src/automation.mjs';
 import { createBulk } from './src/bulk.mjs';
+import { createPlans, schemaDoc } from './src/plans.mjs';
+import { createIntegration } from './src/integration.mjs';
+import { weekAllows, parityToCols, colsToParity } from './src/weeks.mjs';
 
 // Nome/versão vêm do package.json (copiado ao lado deste módulo no bundle),
 // para o /health nunca defasar em relação à versão real publicada.
@@ -58,6 +62,21 @@ wa.setMembershipHandler(automation.onMembership);
 // Acoes em massa (bulk): fila propria no SQLite, retomada no arranque.
 const bulk = createBulk(db, wa);
 bulk.start();
+
+// Planos de acao (isiplan): importacao declarativa gerada por IA. O executor
+// delega para as filas existentes; self-HTTP para schedules/regras/selecoes.
+const plans = createPlans(db, wa, bulk, {
+  mediaDir,
+  appVersion: PKG.version,
+  editionState,
+});
+plans.start();
+
+// Integracao com IA (ponte MCP): descoberta + aprovacoes + auditoria.
+const integration = createIntegration(db, {
+  appVersion: PKG.version,
+  mcpScriptPath: join(dirname(fileURLToPath(import.meta.url)), 'mcp.mjs'),
+});
 
 // Reconexao automatica no arranque: religa todas as contas (chips) com sessao
 // salva — sem precisar clicar em "Conectar" nem reescanear o QR.
@@ -347,17 +366,91 @@ async function route(req, res, url) {
     return json(res, 200, { ok: true });
   }
 
+  // --- Planos de acao (isiplan) ---
+  if (match('POST', '/plans/validate')) {
+    // Corpo binario: .isiplan/.zip (pacote com midia) ou .json solto.
+    const buf = await readBuffer(req, 200 * 1024 * 1024);
+    if (!buf || buf.length === 0) return json(res, 400, { error: 'bad_request', message: 'arquivo vazio' });
+    const filename = decodeURIComponent(req.headers['x-filename'] || 'plano');
+    const r = await plans.validate(buf, filename);
+    if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
+    return json(res, 200, r);
+  }
+  if (match('POST', '/plans/apply')) {
+    const b = await readJson(req);
+    const r = plans.apply(String(b?.staged_id ?? ''), {
+      confirmReapply: !!b?.confirm_reapply,
+      source: b?.source === 'mcp' ? 'mcp' : 'import',
+    });
+    if (r.error === 'already_applied') return json(res, 409, { error: 'already_applied', already_applied: r.already_applied });
+    if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
+    return json(res, 201, r);
+  }
+  if (match('GET', '/plans/runs')) return json(res, 200, { runs: plans.list() });
+  const planRun = path.match(/^\/plans\/runs\/(\d+)$/);
+  if (method === 'GET' && planRun) {
+    const d = plans.detail(Number(planRun[1]));
+    if (!d) return json(res, 404, { error: 'not_found' });
+    return json(res, 200, d);
+  }
+  const planCancel = path.match(/^\/plans\/runs\/(\d+)\/cancel$/);
+  if (method === 'POST' && planCancel) {
+    const r = plans.cancel(Number(planCancel[1]));
+    if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    return json(res, 200, { ok: true });
+  }
+  if (match('GET', '/plans/schema')) return json(res, 200, schemaDoc());
+
+  // --- Integracao com IA (ponte MCP) ---
+  if (match('GET', '/integration')) return json(res, 200, integration.status());
+  if (match('POST', '/integration')) {
+    const b = await readJson(req);
+    return json(res, 200, integration.setEnabled(!!b?.enabled));
+  }
+  if (match('POST', '/integration/request')) {
+    const b = await readJson(req);
+    const r = integration.request({ tool: b?.tool, summary: b?.summary, payload: b?.payload });
+    if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
+    return json(res, 201, r);
+  }
+  if (match('GET', '/integration/approvals')) {
+    return json(res, 200, { approvals: integration.listApprovals(url.searchParams.get('status') || undefined) });
+  }
+  const apprWait = path.match(/^\/integration\/approvals\/(\d+)\/wait$/);
+  if (method === 'GET' && apprWait) {
+    // Long-poll da ponte MCP: segura ate a decisao do usuario ou o timeout.
+    const timeout = Number(url.searchParams.get('timeout_s') ?? 110) * 1000;
+    const r = await integration.wait(Number(apprWait[1]), timeout);
+    if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    return json(res, 200, r);
+  }
+  const apprDecide = path.match(/^\/integration\/approvals\/(\d+)\/decide$/);
+  if (method === 'POST' && apprDecide) {
+    const b = await readJson(req);
+    const r = await integration.decide(Number(apprDecide[1]), !!b?.approve);
+    if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    if (r.error) return json(res, 409, { error: r.error, status: r.status });
+    return json(res, 200, r);
+  }
+  const apprGet = path.match(/^\/integration\/approvals\/(\d+)$/);
+  if (method === 'GET' && apprGet) {
+    const r = integration.getApproval(Number(apprGet[1]));
+    if (!r) return json(res, 404, { error: 'not_found' });
+    return json(res, 200, r);
+  }
+  if (match('GET', '/integration/log')) return json(res, 200, { log: integration.listLog() });
+
   return json(res, 404, { error: 'not_found' });
 }
 
-// Le o corpo bruto (binario) — usado no upload de midia. Limite de 64 MB.
-function readBuffer(req) {
+// Le o corpo bruto (binario) — upload de midia (64 MB) e planos (200 MB).
+function readBuffer(req, maxBytes = 64 * 1024 * 1024) {
   return new Promise((resolve) => {
     const chunks = [];
     let size = 0;
     req.on('data', (chunk) => {
       size += chunk.length;
-      if (size > 64 * 1024 * 1024) {
+      if (size > maxBytes) {
         req.destroy();
         return;
       }
@@ -429,7 +522,7 @@ function computeCoverage(groupJids, accountIds) {
 function parseScheduleInput(body) {
   const {
     name, scheduled_at, content_mode, default_text, targets,
-    kind: rawKind, recur_dow, recur_time,
+    kind: rawKind, recur_dow, recur_time, recur_week_parity,
     payload_type: rawType, media, poll,
     messages, steps: rawSteps, step_min_s, step_max_s, account_ids,
   } = body ?? {};
@@ -453,6 +546,9 @@ function parseScheduleInput(body) {
     const timeOk = typeof recur_time === 'string' && /^\d{2}:\d{2}$/.test(recur_time);
     if (!dowOk || !timeOk) {
       return { error: 'dia da semana (0-6) e horario HH:MM obrigatorios' };
+    }
+    if (recur_week_parity != null && !['odd', 'even'].includes(recur_week_parity)) {
+      return { error: 'paridade da semana deve ser "odd", "even" ou ausente' };
     }
   }
 
@@ -521,13 +617,19 @@ function parseScheduleInput(body) {
     }
   }
 
-  // Recorrente: se hoje ja e o dia e a hora ja passou, marca como "rodado hoje".
+  // Paridade da semana (opcional) como colunas do motor: mod/resto.
+  const weekCols = kind === 'recurring' ? parityToCols(recur_week_parity) : parityToCols(null);
+
+  // Recorrente: se hoje ja e o dia (e a semana bate) e a hora ja passou,
+  // marca como "rodado hoje" para nao disparar retroativamente na criacao.
+  // Se a semana de hoje NAO bate, nao ha o que suprimir — o proximo disparo
+  // cai numa semana valida futura.
   let initialLastRun = null;
   if (kind === 'recurring') {
     const d = new Date();
     const pad = (n) => String(n).padStart(2, '0');
     const hhmm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-    if (d.getDay() === recur_dow && hhmm >= recur_time) {
+    if (d.getDay() === recur_dow && weekAllows(weekCols, d) && hhmm >= recur_time) {
       initialLastRun = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
     }
   }
@@ -540,6 +642,8 @@ function parseScheduleInput(body) {
     scheduled_at: kind === 'once' ? new Date(scheduled_at).toISOString() : null,
     recur_dow: kind === 'recurring' ? recur_dow : null,
     recur_time: kind === 'recurring' ? recur_time : null,
+    recurWeekMod: weekCols.recur_week_mod,
+    recurWeekRem: weekCols.recur_week_rem,
     initialLastRun,
     targets,
   };
@@ -617,8 +721,9 @@ function createSchedule(res, body) {
       .prepare(
         `INSERT INTO schedules
            (account_id, name, scheduled_at, payload_type, content_mode, default_json, status, created_at,
-            kind, recur_dow, recur_time, last_run_at, step_min_s, step_max_s, account_ids_json)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+            kind, recur_dow, recur_time, recur_week_mod, recur_week_rem,
+            last_run_at, step_min_s, step_max_s, account_ids_json)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       )
       .run(
         account?.id ?? null,
@@ -632,6 +737,8 @@ function createSchedule(res, body) {
         p.kind,
         p.recur_dow,
         p.recur_time,
+        p.recurWeekMod,
+        p.recurWeekRem,
         p.initialLastRun,
         p.stepMin,
         p.stepMax,
@@ -669,7 +776,8 @@ function updateSchedule(res, id, body) {
     db.prepare(
       `UPDATE schedules SET
          name = ?, scheduled_at = ?, payload_type = ?, content_mode = ?, default_json = ?,
-         status = ?, kind = ?, recur_dow = ?, recur_time = ?, last_run_at = ?, recur_fired_at = NULL,
+         status = ?, kind = ?, recur_dow = ?, recur_time = ?,
+         recur_week_mod = ?, recur_week_rem = ?, last_run_at = ?, recur_fired_at = NULL,
          step_min_s = ?, step_max_s = ?, account_ids_json = ?, rotation_offset = 0
        WHERE id = ?`
     ).run(
@@ -682,6 +790,8 @@ function updateSchedule(res, id, body) {
       p.kind,
       p.recur_dow,
       p.recur_time,
+      p.recurWeekMod,
+      p.recurWeekRem,
       p.initialLastRun,
       p.stepMin,
       p.stepMax,
@@ -935,7 +1045,7 @@ function listSchedules() {
   return db
     .prepare(
       `SELECT s.id, s.name, s.scheduled_at, s.payload_type, s.content_mode, s.status, s.created_at,
-              s.kind, s.recur_dow, s.recur_time, s.last_run_at,
+              s.kind, s.recur_dow, s.recur_time, s.recur_week_mod, s.recur_week_rem, s.last_run_at,
               COUNT(st.id) AS total,
               SUM(st.status = 'sent')   AS sent,
               SUM(st.status = 'failed') AS failed,
@@ -1005,7 +1115,11 @@ function scheduleDetail(res, id) {
   }
 
   return json(res, 200, {
-    schedule: { ...schedule, account_ids: safeArr(schedule.account_ids_json) },
+    schedule: {
+      ...schedule,
+      account_ids: safeArr(schedule.account_ids_json),
+      recur_week_parity: colsToParity(schedule),
+    },
     steps,
     targets,
   });
@@ -1064,8 +1178,16 @@ function rescheduleSchedule(res, id, body) {
     if (!dowOk || !timeOk) {
       return json(res, 400, { error: 'bad_request', message: 'dia (0-6) e horario HH:MM obrigatorios' });
     }
-    db.prepare("UPDATE schedules SET recur_dow = ?, recur_time = ?, status = 'active', last_run_at = NULL WHERE id = ?")
-      .run(body.recur_dow, body.recur_time, id);
+    if (body?.recur_week_parity != null && !['odd', 'even'].includes(body.recur_week_parity)) {
+      return json(res, 400, { error: 'bad_request', message: 'paridade da semana deve ser "odd", "even" ou ausente' });
+    }
+    // Paridade ausente no corpo = "toda semana". O reagendamento reescreve a
+    // recorrencia inteira, entao a paridade antiga nao sobrevive calada.
+    const wk = parityToCols(body?.recur_week_parity);
+    db.prepare(
+      `UPDATE schedules SET recur_dow = ?, recur_time = ?, recur_week_mod = ?, recur_week_rem = ?,
+              status = 'active', last_run_at = NULL WHERE id = ?`
+    ).run(body.recur_dow, body.recur_time, wk.recur_week_mod, wk.recur_week_rem, id);
   }
   // Reabilita todos os alvos, inclusive os pulados: a cobertura/admin e
   // reavaliada no disparo (chipFor), que re-pula sem tentar se nada mudou.
@@ -1076,12 +1198,17 @@ function rescheduleSchedule(res, id, body) {
 // Bind em porta efemera no loopback; o OS escolhe a porta livre.
 server.listen(0, '127.0.0.1', () => {
   const { port } = server.address();
+  // Self-HTTP (planos/aprovacoes executam contra a propria API) + descoberta MCP.
+  plans.setSelf({ port, token: TOKEN });
+  integration.setSelf({ port, token: TOKEN });
   // O core Rust le este marcador no stdout para descobrir a porta.
   console.log(`${READY_MARKER}${JSON.stringify({ port })}`);
 });
 
 function shutdown(signal) {
   console.error(`[sidecar] recebido ${signal}, encerrando.`);
+  // O arquivo de descoberta MCP so vale enquanto o sidecar esta vivo.
+  integration.cleanup();
   server.close(() => {
     try {
       db.close();

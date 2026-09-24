@@ -7,6 +7,7 @@ import {
   ScheduleKind,
   ScheduleRow,
   Target,
+  WeekParity,
   cancelSchedule,
   createSchedule,
   deleteSchedule,
@@ -18,6 +19,7 @@ import {
   updateSchedule,
 } from "../lib/api";
 import { StepDraft, draftFromStored, newStep, stepDraftToApi, StepSequenceEditor } from "./StepEditor";
+import { fmtDate, isoWeek, isoWeeksInYear, nextRuns } from "../lib/weeks";
 import { GroupPicker } from "./GroupPicker";
 import { usePager, Pager } from "./Pager";
 
@@ -162,7 +164,7 @@ function ScheduleList({
                 <div className="muted small">
                   <span className="tag mini">{TYPE_LABEL[s.payload_type] ?? "Texto"}</span>{" "}
                   {s.kind === "recurring"
-                    ? `toda ${DOW[s.recur_dow ?? 0]} às ${s.recur_time}`
+                    ? `${s.recur_week_mod === 2 ? `${DOW[s.recur_dow ?? 0]} de semanas ${s.recur_week_rem === 1 ? "ímpares" : "pares"}` : `toda ${DOW[s.recur_dow ?? 0]}`} às ${s.recur_time}`
                     : new Date(s.scheduled_at!).toLocaleString("pt-BR")}{" "}
                   · {s.sent ?? 0}/{s.total} enviados
                   {s.failed ? `, ${s.failed} falha(s)` : ""}
@@ -209,6 +211,8 @@ function ScheduleForm({
   const [when, setWhen] = useState(editing?.schedule.kind === "once" ? isoToLocalInput(editing.schedule.scheduled_at) : "");
   const [dow, setDow] = useState(editing?.schedule.recur_dow ?? 1);
   const [time, setTime] = useState(editing?.schedule.recur_time ?? "19:00");
+  // Filtro opcional de paridade da semana ISO. "" = toda semana (padrão).
+  const [parity, setParity] = useState<WeekParity | "">(editing?.schedule.recur_week_parity ?? "");
   const [mode, setMode] = useState<"broadcast" | "per_target">(editing?.schedule.content_mode ?? "broadcast");
 
   const [steps, setSteps] = useState<StepDraft[]>(
@@ -338,6 +342,7 @@ function ScheduleForm({
         scheduled_at: kind === "once" ? new Date(when).toISOString() : undefined,
         recur_dow: kind === "recurring" ? dow : undefined,
         recur_time: kind === "recurring" ? time : undefined,
+        recur_week_parity: kind === "recurring" && parity ? parity : undefined,
         account_ids: multiChip ? [...selectedChips] : undefined,
       };
       const built = await buildTargets();
@@ -401,10 +406,18 @@ function ScheduleForm({
           </label>
         ) : (
           <div className="field">
-            <span>Dia da semana e horário</span>
+            <span>Dia da semana, semana e horário</span>
             <div className="recur-row">
               <select value={dow} onChange={(e) => setDow(Number(e.currentTarget.value))}>
                 {DOW.map((d, i) => (<option key={i} value={i}>{d}</option>))}
+              </select>
+              <select
+                value={parity}
+                onChange={(e) => setParity(e.currentTarget.value as WeekParity | "")}
+              >
+                <option value="">Todas as semanas</option>
+                <option value="odd">Só semanas ímpares</option>
+                <option value="even">Só semanas pares</option>
               </select>
               <input type="time" value={time} onChange={(e) => setTime(e.currentTarget.value)} />
             </div>
@@ -412,9 +425,7 @@ function ScheduleForm({
         )}
       </div>
 
-      {kind === "recurring" && (
-        <p className="muted small">Será enviada toda <b>{DOW[dow]}</b> às <b>{time}</b>, todas as semanas.</p>
-      )}
+      {kind === "recurring" && <RecurPreview dow={dow} time={time} parity={parity || null} />}
 
       <div className="field">
         <span>Destino</span>
@@ -502,5 +513,49 @@ function ScheduleForm({
         </button>
       </div>
     </form>
+  );
+}
+
+// Preview do recorrente. Mostra a semana ISO de hoje (o mesmo número que o
+// Google Agenda exibe) e as próximas datas de disparo — é o que evita o
+// usuário marcar "ímpares" achando que a semana corrente é outra.
+function RecurPreview({ dow, time, parity }: { dow: number; time: string; parity: WeekParity | null }) {
+  const now = new Date();
+  const { isoYear, week } = isoWeek(now);
+  const next = nextRuns(dow, parity, 3, now);
+  // Ano ISO de 53 semanas: a semana 53 é ímpar e a semana 1 seguinte também,
+  // então "ímpares" dispara em duas semanas seguidas na virada.
+  const long53 = parity !== null && isoWeeksInYear(isoYear) === 53;
+
+  return (
+    <div className="muted small">
+      <p>
+        Hoje é a <b>semana {week}</b> ({week % 2 === 1 ? "ímpar" : "par"}). Será enviada{" "}
+        {parity === null ? (
+          <>toda <b>{DOW[dow]}</b></>
+        ) : (
+          <><b>{DOW[dow]}</b> de semanas <b>{parity === "odd" ? "ímpares" : "pares"}</b></>
+        )}{" "}
+        às <b>{time}</b>.
+      </p>
+      {next.length > 0 && (
+        <p>
+          Próximos envios:{" "}
+          {next.map((r, i) => (
+            <span key={i}>
+              {i > 0 ? " · " : ""}
+              <b>{fmtDate(r.date)}</b> (semana {r.week})
+            </span>
+          ))}
+        </p>
+      )}
+      {long53 && (
+        <p>
+          Atenção: {isoYear} tem 53 semanas. Na virada do ano, a semana 53 e a semana 1
+          seguinte são <b>ambas ímpares</b> — um agendamento de semanas ímpares dispara em
+          duas semanas seguidas (e o de pares fica três semanas sem disparar).
+        </p>
+      )}
+    </div>
   );
 }

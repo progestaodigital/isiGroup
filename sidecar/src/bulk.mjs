@@ -1,13 +1,16 @@
 // Acoes em massa (bulk) — operacoes de alto risco aplicadas a varios grupos.
 //
-// Dois grupos de operacoes:
+// Tres grupos de operacoes:
 //   * membros: add_members | remove_members | promote | demote  (usa lista de contatos)
 //   * grupo:   set_name | set_description | set_picture | set_settings  (so grupos)
+//   * criar:   create_groups  (grupos novos em sequencia — nome com {x}, descricao,
+//              imagem, admins e membros iniciais; o chip criador vem nos params)
 //
 // A fila vive no SQLite (fonte de verdade), como no scheduler: o worker processa
 // os itens 'pending' com espacamento aleatorio (anti-flood, NUNCA para evadir
 // deteccao) e e resumivel — se o app cair, jobs 'running' retomam no arranque.
-// Cada acao exige um chip ADMIN conectado do grupo (regra do WhatsApp).
+// Cada acao exige um chip ADMIN conectado do grupo (regra do WhatsApp);
+// create_groups exige apenas que o chip escolhido esteja conectado.
 
 import { readFileSync } from 'node:fs';
 
@@ -27,6 +30,15 @@ const PACE = {
 };
 
 const TICK_MS = 5000; // frequencia do tick de agendamento
+
+// Adicionar membro e a acao de maior risco de banimento (quem nao pediu pra
+// entrar denuncia, e o WhatsApp derruba a sessao do chip). Limita o tamanho do
+// disparo pra forcar lotes menores em vez de um unico job gigante.
+const MAX_ADD_MEMBERS_ITEMS = 30;
+
+// Criacao em serie tambem forca lotes menores (mesma logica anti-abuso acima:
+// muitos grupos novos de uma vez com gente que nao pediu = denuncia = ban).
+const MAX_CREATE_GROUPS = 30;
 
 export function createBulk(db, wa) {
   let draining = false;
@@ -57,21 +69,30 @@ export function createBulk(db, wa) {
   // --- API publica (chamada pelas rotas) ---
 
   function enqueue({ op, groups, contacts, params, run_at }) {
-    if (!MEMBER_OPS.has(op) && !GROUP_OPS.has(op)) {
+    if (!MEMBER_OPS.has(op) && !GROUP_OPS.has(op) && op !== 'create_groups') {
       return { error: 'operacao invalida' };
     }
     const grps = Array.isArray(groups)
       ? groups.filter((g) => g && typeof g.jid === 'string' && g.jid.endsWith('@g.us'))
       : [];
-    if (grps.length === 0) return { error: 'selecione ao menos um grupo' };
+    if (op !== 'create_groups' && grps.length === 0) return { error: 'selecione ao menos um grupo' };
 
     const p = { ...(params ?? {}) };
     p.pace = PACE[p.pace] ? p.pace : 'normal';
 
     let phones = [];
+    const createItems = []; // grupos a criar (so create_groups)
     if (MEMBER_OPS.has(op)) {
       phones = normalizeContacts(contacts);
       if (phones.length === 0) return { error: 'informe ao menos um contato' };
+      if (op === 'add_members' && grps.length * phones.length > MAX_ADD_MEMBERS_ITEMS) {
+        return {
+          error:
+            `adicionar é a ação de maior risco de banimento — no máximo ${MAX_ADD_MEMBERS_ITEMS} adições por disparo ` +
+            `(grupos × contatos). Selecionado: ${grps.length} grupo(s) × ${phones.length} contato(s) = ` +
+            `${grps.length * phones.length}. Divida em lotes menores.`,
+        };
+      }
     } else if (op === 'set_name') {
       p.name = String(p.name ?? '').trim().slice(0, 100);
       if (!p.name) return { error: 'informe o novo nome do grupo' };
@@ -104,6 +125,9 @@ export function createBulk(db, wa) {
       if (changes.length === 0) {
         return { error: 'escolha ao menos uma alteracao (nome, descricao, imagem ou configuracoes)' };
       }
+    } else if (op === 'create_groups') {
+      const err = prepareCreateGroups(p, createItems);
+      if (err) return { error: err };
     }
 
     // Agendamento: run_at no futuro => job comeca 'scheduled'. Passado/ausente
@@ -121,8 +145,9 @@ export function createBulk(db, wa) {
     }
 
     const now = new Date().toISOString();
-    // Um item por (grupo x contato) nas acoes de membro; por grupo nas de grupo.
-    const items = [];
+    // Um item por (grupo x contato) nas acoes de membro; por grupo nas de grupo;
+    // no create_groups, um por grupo A CRIAR (jid placeholder ate a criacao).
+    const items = op === 'create_groups' ? createItems : [];
     for (const g of grps) {
       if (MEMBER_OPS.has(op)) {
         for (const phone of phones) items.push({ jid: g.jid, name: g.name ?? null, contact: phone });
@@ -221,6 +246,15 @@ export function createBulk(db, wa) {
     const pending = db
       .prepare("SELECT * FROM bulk_job_items WHERE job_id = ? AND status = 'pending' ORDER BY id")
       .all(jobId);
+
+    // Criacao de grupos: fluxo proprio — nao ha grupo existente nem chip admin
+    // para resolver (o chip criador foi escolhido pelo usuario e vive nos params).
+    if (job.op === 'create_groups') {
+      await processCreateJob(jobId, params, pending, imin, imax);
+      finalizeJob(jobId);
+      return;
+    }
+
     const byGroup = new Map();
     for (const it of pending) {
       if (!byGroup.has(it.group_jid)) byGroup.set(it.group_jid, []);
@@ -251,11 +285,39 @@ export function createBulk(db, wa) {
             continue;
           }
         }
-        for (const it of items) {
+        // currentAcct pode trocar em add_members: se o chip cair no meio do
+        // grupo e existir OUTRO chip admin ainda conectado nesse grupo, o job
+        // troca pra ele em vez de desistir do restante (multi-chip = menos
+        // itens perdidos por causa de UM chip levar denuncia).
+        let currentAcct = acct;
+        for (let idx = 0; idx < items.length; idx++) {
+          const it = items[idx];
           if (isCanceled(jobId)) break;
           if (!firstAction) await sleep(jitter(imin, imax));
           firstAction = false;
-          await runMemberItem(jobId, job.op, acct, jid, it, byPhone);
+          await runMemberItem(jobId, job.op, currentAcct, jid, it, byPhone);
+          if (job.op === 'add_members' && !wa.isAccountConnected(currentAcct)) {
+            const next = wa.adminAccountForGroup(jid);
+            if (next && next !== currentAcct) {
+              console.error(`[bulk] chip ${currentAcct} caiu durante add_members no grupo ${jid} — trocando p/ chip ${next}`);
+              currentAcct = next;
+              continue;
+            }
+            // Sem outro chip admin conectado: nao adianta insistir nos contatos
+            // restantes — encerra o grupo com um motivo claro em vez de repetir
+            // "nao conectado" item a item.
+            console.error(`[bulk] chip ${currentAcct} caiu durante add_members no grupo ${jid} — nenhum outro chip admin conectado, pausando o restante`);
+            for (let j = idx + 1; j < items.length; j++) {
+              record(
+                jobId,
+                items[j].id,
+                currentAcct,
+                'skipped',
+                'chip desconectado pelo WhatsApp durante a adição (provável denúncia de quem foi adicionado) — reconecte antes de continuar'
+              );
+            }
+            break;
+          }
         }
       } else {
         // Acao de grupo: 1 item por grupo.
@@ -303,7 +365,11 @@ export function createBulk(db, wa) {
         record(jobId, it.id, acct, 'ok', 'rebaixado');
       }
     } catch (e) {
-      record(jobId, it.id, acct, 'failed', e?.message ?? 'erro');
+      const detail =
+        op === 'add_members' && !wa.isAccountConnected(acct)
+          ? 'chip desconectado pelo WhatsApp ao tentar adicionar (provável denúncia de quem foi adicionado sem pedir)'
+          : e?.message ?? 'erro';
+      record(jobId, it.id, acct, 'failed', detail);
     }
   }
 
@@ -361,6 +427,113 @@ export function createBulk(db, wa) {
     }
   }
 
+  // Worker do create_groups: cria um grupo por item, no ritmo escolhido. Se o
+  // chip criador cair no meio, o restante e pulado com motivo claro — sem
+  // fallback: o usuario escolheu explicitamente qual chip cria.
+  async function processCreateJob(jobId, params, pending, imin, imax) {
+    const acct = Number(params.account_id);
+    let pictureBuf = null; // lida do disco uma vez
+    let firstAction = true;
+    for (let idx = 0; idx < pending.length; idx++) {
+      const it = pending[idx];
+      if (isCanceled(jobId)) break;
+      if (!wa.isAccountConnected(acct)) {
+        for (let j = idx; j < pending.length; j++) {
+          record(jobId, pending[j].id, acct, 'skipped', 'chip não conectado — conecte o chip e crie novamente');
+        }
+        break;
+      }
+      if (!firstAction) await sleep(jitter(imin, imax));
+      firstAction = false;
+      if (params.media_path && pictureBuf === null) {
+        try {
+          pictureBuf = readFileSync(params.media_path);
+        } catch (e) {
+          pictureBuf = false; // marca falha permanente de leitura
+          console.error('[bulk] imagem ausente:', e?.message);
+        }
+      }
+      await runCreateItem(jobId, acct, it, params, pictureBuf);
+    }
+  }
+
+  // Cria UM grupo: groupCreate com os participantes iniciais (admins + membros),
+  // depois descricao/imagem e promocao dos admins que de fato entraram. O jid
+  // real substitui o placeholder do item e o grupo entra no cache local
+  // (targets) para aparecer nos pickers sem exigir nova sincronizacao.
+  async function runCreateItem(jobId, acct, it, params, pictureBuf) {
+    const admins = params.admins ?? [];
+    const phones = [...new Set([...admins, ...(params.members ?? [])])];
+    let meta;
+    try {
+      meta = await wa.accountCreateGroup(acct, it.group_name, phones.map((d) => `${d}@s.whatsapp.net`));
+    } catch (e) {
+      record(jobId, it.id, acct, 'failed', `falha ao criar: ${e?.message ?? 'erro'}`);
+      return;
+    }
+    const jid = meta?.id;
+    if (!jid) {
+      record(jobId, it.id, acct, 'failed', 'o WhatsApp não retornou o grupo criado');
+      return;
+    }
+    db.prepare('UPDATE bulk_job_items SET group_jid = ? WHERE id = ?').run(jid, it.id);
+    registerLocalTarget(acct, jid, it.group_name);
+
+    // Quantos contatos de fato entraram (privacidade do contato pode barrar a
+    // adicao direta na criacao — esses ficam de fora).
+    const inGroup = Array.isArray(meta.participants) ? Math.max(0, meta.participants.length - 1) : null;
+    const done = [phones.length && inGroup != null ? `criado (${inGroup}/${phones.length} contato(s) no grupo)` : 'criado'];
+    const fail = [];
+    const step = async (label, fn) => {
+      try {
+        await fn();
+        done.push(label);
+      } catch (e) {
+        fail.push(`${label}: ${e?.message ?? 'erro'}`);
+      }
+      await sleep(jitter(900, 2000));
+    };
+
+    if (params.description) await step('descrição', () => wa.accountSetDescription(acct, jid, params.description));
+    if (params.media_path) {
+      if (!pictureBuf) fail.push('imagem: indisponível');
+      else await step('imagem', () => wa.accountSetGroupPicture(acct, jid, pictureBuf));
+    }
+    if (admins.length) {
+      // Promove os admins que entraram (resolvedor contorna o @lid do Baileys 7).
+      try {
+        const byPhone = await wa.accountResolveGroupMembers(acct, jid, admins);
+        const ids = admins.map((ph) => byPhone[ph]).filter(Boolean);
+        if (ids.length) {
+          await wa.accountPromoteParticipants(acct, jid, ids);
+          done.push(`${ids.length} admin(s) promovido(s)`);
+        }
+        const missing = admins.length - ids.length;
+        if (missing > 0) fail.push(`${missing} admin(s) não entraram no grupo (privacidade do contato) — promova manualmente`);
+      } catch (e) {
+        fail.push(`admins: ${e?.message ?? 'erro'}`);
+      }
+    }
+
+    if (fail.length === 0) record(jobId, it.id, acct, 'ok', `${done.join(', ')} ✓`);
+    else record(jobId, it.id, acct, 'failed', `✓ ${done.join(', ')} · ✗ ${fail.join('; ')}`);
+  }
+
+  // Grava o grupo recem-criado no cache local (tabela targets) — aparece nos
+  // pickers imediatamente, sem exigir "Sincronizar grupos". O criador e admin.
+  function registerLocalTarget(accountId, jid, name) {
+    try {
+      db.prepare(`
+        INSERT INTO targets (account_id, jid, name, type, is_admin, announce, last_synced_at)
+        VALUES (?, ?, ?, 'group', 1, 0, ?)
+        ON CONFLICT(account_id, jid) DO UPDATE SET
+          name = excluded.name, is_admin = 1, last_synced_at = excluded.last_synced_at
+      `).run(accountId, jid, name, new Date().toISOString());
+    } catch (e) {
+      console.error('[bulk] falha ao registrar grupo criado:', e?.message);
+    }
+  }
+
   // Atualiza o nome no cache local (tabela targets) apos renomear o grupo, para
   // o picker refletir na hora — sem exigir "Sincronizar grupos" de novo.
   function renameLocalTarget(jid, name) {
@@ -413,6 +586,47 @@ export function createBulk(db, wa) {
 }
 
 // --- Helpers ---
+
+// Valida/normaliza os params do create_groups e gera um item por grupo a criar.
+// `{x}` no nome vira o numero sequencial a partir de `start` (definido pelo
+// usuario): start=10 => 10, 11, 12… Muta `p` (os params normalizados sao os
+// gravados no job) e enche `items`; retorna a mensagem de erro ou null.
+function prepareCreateGroups(p, items) {
+  const accountId = Number(p.account_id);
+  if (!Number.isInteger(accountId) || accountId <= 0) return 'escolha o chip que vai criar os grupos';
+  p.account_id = accountId;
+
+  p.name = String(p.name ?? '').trim().slice(0, 100);
+  if (!p.name) return 'informe o nome do grupo';
+
+  const quantity = Number(p.quantity ?? 1);
+  if (!Number.isInteger(quantity) || quantity < 1) return 'quantidade de grupos inválida';
+  if (quantity > MAX_CREATE_GROUPS) {
+    return `no máximo ${MAX_CREATE_GROUPS} grupos por disparo — divida em lotes menores`;
+  }
+  p.quantity = quantity;
+
+  const hasSeq = /\{x\}/i.test(p.name);
+  if (quantity > 1 && !hasSeq) {
+    return 'para criar vários grupos, use {x} no nome — ele vira o número sequencial (ex: "Turma {x}")';
+  }
+
+  const start = Number(p.start ?? 1);
+  if (!Number.isInteger(start) || start < 0) return 'primeiro número inválido';
+  p.start = start;
+
+  p.description = typeof p.description === 'string' ? p.description.slice(0, 2000) : '';
+  p.admins = normalizeContacts(p.admins);
+  // Admin ja entra como participante na criacao; nao duplica na lista de membros.
+  p.members = normalizeContacts(p.members).filter((m) => !p.admins.includes(m));
+
+  for (let i = 0; i < quantity; i++) {
+    const name = (hasSeq ? p.name.replace(/\{x\}/gi, String(start + i)) : p.name).slice(0, 100);
+    // jid placeholder (nao termina em @g.us) — trocado pelo jid real na criacao.
+    items.push({ jid: `novo-${i + 1}`, name, contact: null });
+  }
+  return null;
+}
 
 // Normaliza a lista de contatos: extrai digitos, remove vazios/duplicados.
 // Aceita array de strings ou texto colado (uma por linha / separado por virgula).

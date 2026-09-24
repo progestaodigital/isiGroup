@@ -271,6 +271,9 @@ export type ScheduleStatus =
 
 export type ScheduleKind = "once" | "recurring";
 
+// Filtro opcional de paridade da semana ISO (recorrentes). null = toda semana.
+export type WeekParity = "odd" | "even";
+
 export interface ScheduleRow {
   id: number;
   name: string | null;
@@ -282,6 +285,8 @@ export interface ScheduleRow {
   kind: ScheduleKind;
   recur_dow: number | null;
   recur_time: string | null;
+  recur_week_mod: number | null; // 2 = filtro de paridade ativo; null = toda semana
+  recur_week_rem: number | null; // 1 = semanas ímpares, 0 = pares
   last_run_at: string | null;
   total: number;
   sent: number | null;
@@ -320,6 +325,7 @@ export interface NewSchedule {
   scheduled_at?: string; // ISO (once)
   recur_dow?: number; // 0-6 (recurring)
   recur_time?: string; // HH:MM (recurring)
+  recur_week_parity?: WeekParity; // ausente = toda semana
   content_mode: "broadcast" | "per_target";
   payload_type: PayloadType;
   default_text?: string;
@@ -337,7 +343,12 @@ export const deleteSchedule = (id: number) =>
 
 export const rescheduleSchedule = (
   id: number,
-  body: { scheduled_at?: string; recur_dow?: number; recur_time?: string }
+  body: {
+    scheduled_at?: string;
+    recur_dow?: number;
+    recur_time?: string;
+    recur_week_parity?: WeekParity;
+  }
 ) =>
   sidecar<{ ok?: boolean; error?: string }>(`/schedules/${id}/reschedule`, {
     method: "POST",
@@ -459,6 +470,7 @@ export interface ScheduleDetail {
     scheduled_at: string | null;
     recur_dow: number | null;
     recur_time: string | null;
+    recur_week_parity: WeekParity | null;
     content_mode: "broadcast" | "per_target";
     payload_type: string;
     step_min_s: number | null;
@@ -503,7 +515,8 @@ export type BulkOp =
   | "set_description"
   | "set_picture"
   | "set_settings"
-  | "set_group"; // ação combinada (nome/descrição/imagem/config numa só)
+  | "set_group" // ação combinada (nome/descrição/imagem/config numa só)
+  | "create_groups"; // cria grupos novos em sequência ({x} no nome = numeração)
 
 export type BulkPace = "slow" | "normal" | "fast";
 
@@ -520,6 +533,12 @@ export interface BulkParams {
   description?: string;
   media_path?: string;
   settings?: BulkSettings;
+  // create_groups: chip criador + numeração sequencial + participantes iniciais.
+  account_id?: number;
+  quantity?: number; // quantos grupos criar
+  start?: number; // primeiro número da sequência ({x} no nome)
+  admins?: string[]; // telefones a promover a admin
+  members?: string[]; // telefones dos membros iniciais
 }
 
 export interface NewBulkJob {
@@ -568,3 +587,137 @@ export const listBulkJobs = () => sidecar<{ jobs: BulkJobRow[] }>("/bulk");
 export const getBulkJob = (id: number) => sidecar<BulkJobDetail>(`/bulk/${id}`);
 export const cancelBulkJob = (id: number) =>
   sidecar<{ ok?: boolean }>(`/bulk/${id}/cancel`, { method: "POST" });
+
+// --- Planos de ação (isiplan) ---
+
+export interface PlanPreviewItem {
+  order_index: number;
+  id: string | null;
+  type: string;
+  summary: string;
+  resolution: { count: number; notes: string[] } | null;
+}
+
+export interface PlanPreview {
+  items: PlanPreviewItem[];
+  totals: Record<string, number>;
+  webhooks: string[];
+}
+
+export interface PlanApplied {
+  run_id: number;
+  name: string | null;
+  status: string;
+  at: string;
+}
+
+export interface PlanValidation {
+  staged_id?: string;
+  name?: string;
+  preview?: PlanPreview;
+  warnings?: string[];
+  already_applied?: PlanApplied | null;
+  error?: string;
+  message?: string;
+}
+
+// Upload binário do plano (.isiplan/.zip/.json) → validação + prévia.
+export async function validatePlan(file: File): Promise<PlanValidation> {
+  if (!cachedInfo) cachedInfo = await getSidecarInfo();
+  const buf = await file.arrayBuffer();
+  const res = await fetch(`http://127.0.0.1:${cachedInfo.port}/plans/validate`, {
+    method: "POST",
+    headers: {
+      "x-isi-token": cachedInfo.token,
+      "content-type": "application/octet-stream",
+      "x-filename": encodeURIComponent(file.name),
+    },
+    body: buf,
+  });
+  return (await res.json()) as PlanValidation;
+}
+
+export const applyPlan = (staged_id: string, confirm_reapply: boolean) =>
+  sidecar<{ run_id?: number; error?: string; message?: string; already_applied?: PlanApplied }>("/plans/apply", {
+    method: "POST",
+    ...jbody({ staged_id, confirm_reapply }),
+  });
+
+export type PlanRunStatus = "running" | "done" | "failed" | "canceled";
+export type PlanStepStatus = "pending" | "running" | "waiting" | "done" | "failed" | "skipped";
+
+export interface PlanRunRow {
+  id: number;
+  plan_id: string | null;
+  name: string | null;
+  status: PlanRunStatus;
+  source: "import" | "mcp";
+  total_steps: number;
+  created_at: string;
+  finished_at: string | null;
+  report: { counts?: { done: number; failed: number; skipped: number } };
+}
+
+export interface PlanRunStep {
+  order_index: number;
+  action_id: string | null;
+  action_type: string;
+  status: PlanStepStatus;
+  detail: string | null;
+  summary: string;
+  result: Record<string, unknown>;
+}
+
+export interface PlanRunDetail {
+  run: PlanRunRow & { plan_hash: string };
+  steps: PlanRunStep[];
+}
+
+export const listPlanRuns = () => sidecar<{ runs: PlanRunRow[] }>("/plans/runs");
+export const getPlanRun = (id: number) => sidecar<PlanRunDetail>(`/plans/runs/${id}`);
+export const cancelPlanRun = (id: number) =>
+  sidecar<{ ok?: boolean }>(`/plans/runs/${id}/cancel`, { method: "POST" });
+export const getPlanSchema = () => sidecar<Record<string, unknown>>("/plans/schema");
+
+// --- Integração com IA (ponte MCP) ---
+
+export interface IntegrationStatus {
+  enabled: boolean;
+  file_path: string;
+  mcp_script_path: string;
+  pending_approvals: number;
+}
+
+export const getIntegration = () => sidecar<IntegrationStatus>("/integration");
+export const setIntegration = (enabled: boolean) =>
+  sidecar<IntegrationStatus>("/integration", { method: "POST", ...jbody({ enabled }) });
+
+export interface Approval {
+  id: number;
+  source: string;
+  tool: string;
+  summary: string;
+  status: "pending" | "approved" | "denied" | "expired";
+  created_at: string;
+  decided_at: string | null;
+}
+
+export const listApprovals = (status?: string) =>
+  sidecar<{ approvals: Approval[] }>(`/integration/approvals${status ? `?status=${status}` : ""}`);
+export const decideApproval = (id: number, approve: boolean) =>
+  sidecar<{ ok?: boolean; status?: string; error?: string }>(`/integration/approvals/${id}/decide`, {
+    method: "POST",
+    ...jbody({ approve }),
+  });
+
+export interface IntegrationLogRow {
+  id: number;
+  source: string;
+  tool: string;
+  summary: string | null;
+  approval_id: number | null;
+  result: string | null;
+  created_at: string;
+}
+
+export const getIntegrationLog = () => sidecar<{ log: IntegrationLogRow[] }>("/integration/log");

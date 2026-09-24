@@ -4,6 +4,7 @@
 // apenas para nao floodar e respeitar rate limit, nunca para evadir deteccao.
 
 import { readFileSync } from 'node:fs';
+import { weekAllows } from './weeks.mjs';
 
 const TICK_MS = 5000;
 const SPACING_MIN_MS = 2500;
@@ -138,6 +139,11 @@ export function createScheduler(db, wa) {
 
     for (const s of recs) {
       if (s.recur_dow !== dow) continue;
+      // Filtro opcional de paridade da semana ISO (semanas pares/impares).
+      // Sem filtro, weekAllows e sempre true (comportamento de toda semana).
+      // Semana que nao bate nao dispara e nao deixa nada pendente: o proximo
+      // disparo e na proxima semana valida, pelo caminho normal.
+      if (!weekAllows(s, now)) continue;
       if (hhmm < (s.recur_time ?? '99:99')) continue; // ainda nao chegou a hora
       if (inFlight.has(s.id)) continue;
 

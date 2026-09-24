@@ -487,7 +487,7 @@ select option:disabled { color: rgba(26, 26, 26, 0.45); }
 .selection-chip .chip-del:hover:not(:disabled) { color: var(--danger); background: var(--bg-elev2); }
 .per-target { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 
-.recur-row { display: flex; gap: 10px; align-items: center; }
+.recur-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .recur-row select, .recur-row input {
   background: var(--input-bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
   color: var(--text); padding: 10px 12px; font-size: 14px; font-family: inherit;
@@ -685,3 +685,30 @@ select option:disabled { color: rgba(26, 26, 26, 0.45); }
 }
 .edit-section + .edit-section { border-top: 1px solid var(--border); }
 .edit-section .check { font-weight: 600; }
+
+/* Aprovações pendentes de ações pedidas por IA (MCP) — visíveis em toda aba */
+.approvals { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
+.approval {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border: 1px solid rgba(255, 196, 0, 0.4);
+  background: linear-gradient(95deg, rgba(255, 196, 0, 0.09), transparent);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+}
+.approval .appr-actions { display: flex; gap: 10px; align-items: center; flex-shrink: 0; }
+
+/* Linha de comando copiável (registro do MCP) */
+.code-line {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+}
+.code-line code { flex: 1; overflow-x: auto; white-space: nowrap; }

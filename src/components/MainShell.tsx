@@ -2,9 +2,12 @@ import { useEffect, useState } from "react";
 import { check, Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import {
+  Approval,
   LicenseState,
   clearLicense,
+  decideApproval,
   getAppVersion,
+  listApprovals,
   setSidecarEdition,
 } from "../lib/api";
 import { ConnectionsView } from "./ConnectionsView";
@@ -12,6 +15,7 @@ import { TargetsView } from "./TargetsView";
 import { SchedulerView } from "./SchedulerView";
 import { AutomationView } from "./AutomationView";
 import { BulkActionsView } from "./BulkActionsView";
+import { PlansView } from "./PlansView";
 import { FaqView } from "./FaqView";
 
 interface Props {
@@ -19,7 +23,7 @@ interface Props {
   onLicenseChange: (s: LicenseState) => void;
 }
 
-type View = "overview" | "connection" | "targets" | "scheduler" | "automation" | "bulk" | "faq" | "support";
+type View = "overview" | "connection" | "targets" | "scheduler" | "automation" | "bulk" | "plans" | "faq" | "support";
 
 const FUTURE: { fase: number; nome: string }[] = [];
 
@@ -77,6 +81,12 @@ export function MainShell({ license, onLicenseChange }: Props) {
             Ações em massa
           </button>
           <button
+            className={`nav-item ${view === "plans" ? "active" : ""}`}
+            onClick={() => setView("plans")}
+          >
+            Planos &amp; IA
+          </button>
+          <button
             className={`nav-item ${view === "faq" ? "active" : ""}`}
             onClick={() => setView("faq")}
           >
@@ -104,6 +114,7 @@ export function MainShell({ license, onLicenseChange }: Props) {
       </aside>
 
       <main className="content">
+        <ApprovalsBar />
         {view === "overview" && <Overview license={license} onGo={setView} />}
         {view === "connection" && (
           <ConnectionsView isPro={isPro} onConnected={() => setView("targets")} />
@@ -112,9 +123,59 @@ export function MainShell({ license, onLicenseChange }: Props) {
         {view === "scheduler" && <SchedulerView isPro={isPro} />}
         {view === "automation" && <AutomationView isPro={isPro} />}
         {view === "bulk" && <BulkActionsView />}
+        {view === "plans" && <PlansView />}
         {view === "faq" && <FaqView isPro={isPro} />}
         {view === "support" && <SupportView />}
       </main>
+    </div>
+  );
+}
+
+// Pedidos de aprovação de ações vindas de IA (MCP) — visíveis em qualquer aba.
+// A decisão executa (ou recusa) a ação no sidecar; a ponte MCP aguarda o resultado.
+function ApprovalsBar() {
+  const [pending, setPending] = useState<Approval[]>([]);
+  const [busy, setBusy] = useState<number | null>(null);
+
+  useEffect(() => {
+    const load = () => listApprovals("pending").then((r) => setPending(r.approvals)).catch(() => {});
+    load();
+    const t = window.setInterval(load, 4000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  if (pending.length === 0) return null;
+
+  async function decide(id: number, approve: boolean) {
+    setBusy(id);
+    try {
+      await decideApproval(id, approve);
+      setPending((prev) => prev.filter((p) => p.id !== id));
+    } catch {
+      /* recarrega no próximo tick */
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="approvals">
+      {pending.map((a) => (
+        <div key={a.id} className="approval">
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <b>🤖 A IA pediu: {a.tool}</b>
+            <div className="muted small">{a.summary}</div>
+          </div>
+          <div className="appr-actions">
+            <button disabled={busy === a.id} onClick={() => decide(a.id, true)}>
+              {busy === a.id ? "Executando…" : "Aprovar"}
+            </button>
+            <button className="link subtle danger" disabled={busy === a.id} onClick={() => decide(a.id, false)}>
+              Recusar
+            </button>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

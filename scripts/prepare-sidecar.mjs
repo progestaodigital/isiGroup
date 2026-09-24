@@ -24,8 +24,9 @@ const nodeName = process.platform === 'win32' ? 'node.exe' : 'node';
 console.log('[bundle] copiando node:', process.execPath);
 cpSync(process.execPath, join(res, nodeName));
 
-// 2) Código do sidecar.
-for (const f of ['index.mjs', 'package.json']) {
+// 2) Código do sidecar (mcp.mjs = ponte MCP para IAs locais, spawnada pelo
+// Claude Code apontando para os resources do app instalado).
+for (const f of ['index.mjs', 'mcp.mjs', 'package.json']) {
   cpSync(join(sidecarSrc, f), join(sidecarDst, f));
 }
 for (const d of ['src', 'migrations']) {
