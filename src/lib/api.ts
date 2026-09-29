@@ -588,6 +588,65 @@ export const getBulkJob = (id: number) => sidecar<BulkJobDetail>(`/bulk/${id}`);
 export const cancelBulkJob = (id: number) =>
   sidecar<{ ok?: boolean }>(`/bulk/${id}/cancel`, { method: "POST" });
 
+// --- Edição de grupos recorrente (modelo semanal + paridade de semana) ---
+// Só operações de EDIÇÃO de grupo podem ser recorrentes — o motor recusa
+// ações de membro e criação em série.
+export type BulkRecurringStatus = "active" | "paused" | "canceled";
+
+export interface NewBulkRecurring {
+  name?: string;
+  op: BulkOp; // set_group | set_name | set_description | set_picture | set_settings
+  groups: Array<{ jid: string; name?: string }>;
+  params: BulkParams;
+  recur_dow: number; // 0-6
+  recur_time: string; // HH:MM
+  recur_week_parity?: WeekParity; // ausente = todas as semanas
+}
+
+export interface BulkRecurringRow {
+  id: number;
+  name: string | null;
+  op: BulkOp;
+  groups: Array<{ jid: string; name: string | null }>;
+  params: BulkParams;
+  recur_dow: number;
+  recur_time: string;
+  recur_week_parity: WeekParity | null;
+  last_run_at: string | null;
+  status: BulkRecurringStatus;
+  created_at: string;
+  // Resumo da execução mais recente gerada por este modelo (null = nunca rodou).
+  last_job: {
+    id: number;
+    status: BulkJobRow["status"];
+    ok: number;
+    failed: number;
+    skipped: number;
+    total: number;
+    finished_at: string | null;
+  } | null;
+}
+
+export const createBulkRecurring = (b: NewBulkRecurring) =>
+  sidecar<{ id?: number; error?: string; message?: string }>("/bulk/recurring", {
+    method: "POST",
+    ...jbody(b),
+  });
+export const listBulkRecurring = () =>
+  sidecar<{ recurring: BulkRecurringRow[] }>("/bulk/recurring");
+export const updateBulkRecurring = (id: number, b: NewBulkRecurring) =>
+  sidecar<{ ok?: boolean; error?: string; message?: string }>(`/bulk/recurring/${id}`, {
+    method: "PUT",
+    ...jbody(b),
+  });
+export const setBulkRecurringStatus = (id: number, status: BulkRecurringStatus) =>
+  sidecar<{ ok?: boolean }>(`/bulk/recurring/${id}/status`, { method: "POST", ...jbody({ status }) });
+export const deleteBulkRecurring = (id: number) =>
+  sidecar<{ ok?: boolean }>(`/bulk/recurring/${id}`, { method: "DELETE" });
+// Dispara fora da agenda; não mexe na trava do dia (a semanal segue valendo).
+export const runBulkRecurringNow = (id: number) =>
+  sidecar<{ id?: number; error?: string; message?: string }>(`/bulk/recurring/${id}/run`, { method: "POST" });
+
 // --- Planos de ação (isiplan) ---
 
 export interface PlanPreviewItem {

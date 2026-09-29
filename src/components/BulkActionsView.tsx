@@ -6,20 +6,29 @@ import {
   BulkOp,
   BulkPace,
   BulkParams,
+  BulkRecurringRow,
   BulkSettings,
   MediaInfo,
   NewBulkJob,
+  NewBulkRecurring,
   Target,
+  WeekParity,
   cancelBulkJob,
   createBulkJob,
+  createBulkRecurring,
+  deleteBulkRecurring,
   getBulkJob,
   listAccounts,
   listBulkJobs,
+  listBulkRecurring,
   listTargets,
+  runBulkRecurringNow,
+  setBulkRecurringStatus,
   uploadMedia,
 } from "../lib/api";
 import { GroupPicker } from "./GroupPicker";
 import { usePager, Pager } from "./Pager";
+import { RecurPreview } from "./RecurPreview";
 
 const MEMBER_OPS: BulkOp[] = ["add_members", "remove_members", "promote", "demote"];
 
@@ -60,6 +69,8 @@ function parseContacts(text: string): string[] {
   return out;
 }
 
+const DOW_LABEL = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
+
 type Tri = "keep" | "all" | "admins";
 type TriApproval = "keep" | "on" | "off";
 
@@ -67,12 +78,15 @@ export function BulkActionsView() {
   const [targets, setTargets] = useState<Target[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [jobs, setJobs] = useState<BulkJobRow[]>([]);
+  const [recurring, setRecurring] = useState<BulkRecurringRow[]>([]);
 
-  // Atualiza grupos (nomes podem mudar após um rename em massa), chips e jobs.
+  // Atualiza grupos (nomes podem mudar após um rename em massa), chips, jobs
+  // e os modelos de edição recorrente.
   const refresh = useCallback(() => {
     listTargets().then((r) => setTargets(r.targets)).catch(() => {});
     listAccounts().then((r) => setAccounts(r.accounts)).catch(() => {});
     listBulkJobs().then((r) => setJobs(r.jobs)).catch(() => {});
+    listBulkRecurring().then((r) => setRecurring(r.recurring)).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -115,6 +129,13 @@ export function BulkActionsView() {
       </div>
 
       <BulkForm adminGroups={adminGroups} accounts={accounts} onCreated={refresh} />
+
+      {recurring.length > 0 && (
+        <>
+          <h2 className="section-title">Edições recorrentes</h2>
+          <RecurringList rows={recurring} onChanged={refresh} />
+        </>
+      )}
 
       <h2 className="section-title">Execuções</h2>
       <JobsList jobs={jobs} onChanged={refresh} />
@@ -160,8 +181,13 @@ function BulkForm({
   const [approval, setApproval] = useState<TriApproval>("keep");
 
   const [pace, setPace] = useState<BulkPace>("normal");
-  const [when, setWhen] = useState<"now" | "schedule">("now");
+  const [when, setWhen] = useState<"now" | "schedule" | "recurring">("now");
   const [runAt, setRunAt] = useState("");
+  // Recorrente (só edição de grupos): dia da semana + paridade + horário.
+  const [recName, setRecName] = useState("");
+  const [recDow, setRecDow] = useState(1);
+  const [recTime, setRecTime] = useState("09:00");
+  const [recParity, setRecParity] = useState<WeekParity | "">("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -199,10 +225,15 @@ function BulkForm({
     return `${gen(0)}, ${gen(1)}, ${gen(2)}, …, ${gen(qty - 1)}`;
   }, [createName, createQty, createStart, hasSeq]);
 
+  const GROUP_EDIT_OPS: BulkOp[] = ["set_group", "set_name", "set_description", "set_picture", "set_settings"];
+
   function chooseOp(next: BulkOp) {
     setOp(next);
     setErr(null);
     setNote(null);
+    // Só edição de grupos pode ser recorrente — trocar para membros/criação
+    // volta o disparo para "Agora" em vez de deixar um estado impossível.
+    if (!GROUP_EDIT_OPS.includes(next)) setWhen((w) => (w === "recurring" ? "now" : w));
   }
 
   async function onContactsFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -304,6 +335,41 @@ function BulkForm({
       if (picture) params.media_path = picture.stored_path;
       if (createAdmins.length) params.admins = createAdmins;
       if (createMembers.length) params.members = createMembers;
+    }
+
+    // Recorrente: grava um MODELO (não um job). Cada disparo semanal gera uma
+    // execução nova, preservando o histórico de cada rodada.
+    if (when === "recurring") {
+      if (!recTime) return setErr("Defina o horário.");
+      if (groupJids.length === 0) return setErr("Selecione ao menos um grupo.");
+      const body: NewBulkRecurring = {
+        name: recName.trim() || undefined,
+        op,
+        groups: groupJids.map((g) => ({ jid: g.jid, name: g.name })),
+        params,
+        recur_dow: recDow,
+        recur_time: recTime,
+        recur_week_parity: recParity || undefined,
+      };
+      const quando = recParity
+        ? `${DOW_LABEL[recDow]} de semanas ${recParity === "odd" ? "ímpares" : "pares"}`
+        : `toda ${DOW_LABEL[recDow]}`;
+      if (!confirm(`Criar edição recorrente — ${quando} às ${recTime}, em ${groupJids.length} grupo(s)?`)) return;
+      setBusy(true);
+      try {
+        const r = await createBulkRecurring(body);
+        if (r.error) {
+          setErr(r.message ?? "Não foi possível criar.");
+          return;
+        }
+        setNote("Edição recorrente criada.");
+        onCreated();
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : "Falha ao criar.");
+      } finally {
+        setBusy(false);
+      }
+      return;
     }
 
     // Agendamento.
@@ -650,9 +716,37 @@ function BulkForm({
         <div className="seg">
           <button type="button" className={when === "now" ? "on" : ""} onClick={() => setWhen("now")}>Agora</button>
           <button type="button" className={when === "schedule" ? "on" : ""} onClick={() => setWhen("schedule")}>Agendar</button>
+          {isGroupEdit && (
+            <button type="button" className={when === "recurring" ? "on" : ""} onClick={() => setWhen("recurring")}>
+              Recorrente
+            </button>
+          )}
         </div>
         {when === "schedule" && (
           <input type="datetime-local" value={runAt} onChange={(e) => setRunAt(e.currentTarget.value)} style={{ marginTop: 8, maxWidth: 260 }} />
+        )}
+        {when === "recurring" && (
+          <div style={{ marginTop: 8 }}>
+            <label className="field">
+              <span>Título (opcional)</span>
+              <input value={recName} onChange={(e) => setRecName(e.currentTarget.value)} placeholder="Ex: Descrição da semana" />
+            </label>
+            <div className="recur-row" style={{ marginTop: 8 }}>
+              <select value={recDow} onChange={(e) => setRecDow(Number(e.currentTarget.value))}>
+                {DOW_LABEL.map((d, i) => (<option key={i} value={i}>{d}</option>))}
+              </select>
+              <select value={recParity} onChange={(e) => setRecParity(e.currentTarget.value as WeekParity | "")}>
+                <option value="">Todas as semanas</option>
+                <option value="odd">Só semanas ímpares</option>
+                <option value="even">Só semanas pares</option>
+              </select>
+              <input type="time" value={recTime} onChange={(e) => setRecTime(e.currentTarget.value)} />
+            </div>
+            <RecurPreview dow={recDow} time={recTime} parity={recParity || null} />
+          </div>
+        )}
+        {isGroupEdit && when !== "recurring" && (
+          <span className="hint">Recorrente só vale para edição de grupos — ações de membro e criação em série continuam sendo disparo único.</span>
         )}
       </div>
 
@@ -662,9 +756,11 @@ function BulkForm({
         <button type="submit" disabled={busy}>
           {busy
             ? "Enviando…"
-            : when === "schedule"
-              ? isCreate ? "Agendar criação" : "Agendar ação"
-              : isCreate ? "Criar grupos" : "Executar ação em massa"}
+            : when === "recurring"
+              ? "Criar edição recorrente"
+              : when === "schedule"
+                ? isCreate ? "Agendar criação" : "Agendar ação"
+                : isCreate ? "Criar grupos" : "Executar ação em massa"}
         </button>
       </div>
     </form>
@@ -824,6 +920,81 @@ function JobRow({
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+// Lista dos modelos de edição recorrente. Cada linha mostra a regra semanal,
+// a última execução gerada e os controles de pausa / disparo avulso / remoção.
+function RecurringList({ rows, onChanged }: { rows: BulkRecurringRow[]; onChanged: () => void }) {
+  const quando = (r: BulkRecurringRow) =>
+    r.recur_week_parity
+      ? `${DOW_LABEL[r.recur_dow]} de semanas ${r.recur_week_parity === "odd" ? "ímpares" : "pares"}`
+      : `toda ${DOW_LABEL[r.recur_dow]}`;
+
+  // Resumo do que a edição altera — os mesmos campos que o motor aplica.
+  const alteracoes = (r: BulkRecurringRow) => {
+    const p = r.params ?? {};
+    const out: string[] = [];
+    if (typeof p.name === "string") out.push("nome");
+    if (typeof p.description === "string") out.push("descrição");
+    if (p.media_path) out.push("imagem");
+    if (p.settings && Object.keys(p.settings).length) out.push("configurações");
+    return out.length ? out.join(", ") : "—";
+  };
+
+  return (
+    <div className="list">
+      {rows.map((r) => (
+        <div key={r.id} className="row-item col">
+          <div className="row-main">
+            <div>
+              <b>{r.name || "(sem título)"}</b>
+              <div className="muted small">
+                {quando(r)} às {r.recur_time} · {r.groups.length} grupo(s) · altera: {alteracoes(r)}
+                {r.last_run_at ? ` · último disparo: ${r.last_run_at}` : " · nunca disparou"}
+                {r.last_job
+                  ? ` · última execução: ${r.last_job.ok} ok, ${r.last_job.failed} falha(s), ${r.last_job.skipped} pulado(s)`
+                  : ""}
+              </div>
+            </div>
+            <div className="tags">
+              <span className={`tag ${r.status === "active" ? "ok" : "off"}`}>
+                {r.status === "active" ? "Ativo" : r.status === "paused" ? "Pausado" : "Cancelado"}
+              </span>
+              <button
+                className="link subtle"
+                onClick={async () => {
+                  await setBulkRecurringStatus(r.id, r.status === "active" ? "paused" : "active");
+                  onChanged();
+                }}
+              >
+                {r.status === "active" ? "Pausar" : "Retomar"}
+              </button>
+              <button
+                className="link subtle"
+                onClick={async () => {
+                  if (!confirm(`Executar "${r.name || "esta edição"}" agora, em ${r.groups.length} grupo(s)?`)) return;
+                  await runBulkRecurringNow(r.id);
+                  onChanged();
+                }}
+              >
+                Executar agora
+              </button>
+              <button
+                className="link subtle"
+                onClick={async () => {
+                  if (!confirm("Remover esta edição recorrente? O histórico das execuções já feitas é mantido.")) return;
+                  await deleteBulkRecurring(r.id);
+                  onChanged();
+                }}
+              >
+                Remover
+              </button>
+            </div>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

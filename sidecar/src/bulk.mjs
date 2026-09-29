@@ -13,6 +13,7 @@
 // create_groups exige apenas que o chip escolhido esteja conectado.
 
 import { readFileSync } from 'node:fs';
+import { weekAllows, parityToCols, colsToParity } from './weeks.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (min, max) => min + Math.floor(Math.random() * Math.max(1, max - min));
@@ -63,7 +64,70 @@ export function createBulk(db, wa) {
       db.prepare("UPDATE bulk_jobs SET status = 'running' WHERE id = ?").run(j.id);
       console.error(`[bulk] job ${j.id} agendado disparando`);
     }
+    tickRecurring();
     drain().catch((e) => console.error('[bulk] drain:', e?.message));
+  }
+
+  // --- Edicao de grupos recorrente (semanal + paridade de semana opcional) ---
+  // Mesma semantica do scheduler de mensagens: dia da semana + horario, trava
+  // de um disparo por dia (last_run_at) e catch-up — se o app estava fora as
+  // 09:00 e subiu 09:10, ainda dispara hoje.
+  function tickRecurring() {
+    const now = new Date();
+    const dow = now.getDay();
+    const hhmm = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
+    const today = localDate(now);
+
+    const recs = db.prepare("SELECT * FROM bulk_recurring WHERE status = 'active'").all();
+    for (const r of recs) {
+      if (r.recur_dow !== dow) continue;
+      if (!weekAllows(r, now)) continue;      // filtro de semana par/impar (migration 016)
+      if (hhmm < (r.recur_time ?? '99:99')) continue;
+      if (r.last_run_at === today) continue;  // ja disparou hoje
+
+      // Marca o dia ANTES de criar o job: no maximo um disparo por dia mesmo
+      // que a criacao falhe no meio.
+      db.prepare('UPDATE bulk_recurring SET last_run_at = ? WHERE id = ?').run(today, r.id);
+      try {
+        const res = spawnFromRecurring(r);
+        if (res.error) console.error(`[bulk] recorrente #${r.id} nao disparou: ${res.error}`);
+        else console.error(`[bulk] recorrente #${r.id} -> job ${res.id} (${today} ${hhmm})`);
+      } catch (e) {
+        console.error(`[bulk] recorrente #${r.id} falhou:`, e?.message);
+      }
+    }
+  }
+
+  // Cria um bulk_jobs novo a partir do modelo. Cada disparo e um job proprio,
+  // com seu log de itens — o historico das execucoes anteriores fica intacto.
+  function spawnFromRecurring(rec) {
+    const groups = safeArr(rec.groups_json).filter((g) => g && typeof g.jid === 'string' && g.jid.endsWith('@g.us'));
+    if (!groups.length) return { error: 'modelo sem grupos validos' };
+    const params = safeObj(rec.params_json);
+    params.pace = PACE[params.pace] ? params.pace : 'normal';
+
+    const now = new Date().toISOString();
+    const items = groups.map((g) => ({ jid: g.jid, name: g.name ?? null, contact: null }));
+
+    db.exec('BEGIN;');
+    let jobId;
+    try {
+      const r = db
+        .prepare(
+          'INSERT INTO bulk_jobs (op, status, params_json, total, run_at, created_at, recurring_id) VALUES (?,?,?,?,?,?,?)'
+        )
+        .run(rec.op, 'running', JSON.stringify(params), items.length, null, now, rec.id);
+      jobId = r.lastInsertRowid;
+      const ins = db.prepare(
+        'INSERT INTO bulk_job_items (job_id, group_jid, group_name, contact, status, created_at) VALUES (?,?,?,?,?,?)'
+      );
+      for (const it of items) ins.run(jobId, it.jid, it.name, it.contact, 'pending', now);
+      db.exec('COMMIT;');
+    } catch (e) {
+      db.exec('ROLLBACK;');
+      return { error: e?.message ?? 'erro ao criar o job' };
+    }
+    return { id: jobId };
   }
 
   // --- API publica (chamada pelas rotas) ---
@@ -93,38 +157,9 @@ export function createBulk(db, wa) {
             `${grps.length * phones.length}. Divida em lotes menores.`,
         };
       }
-    } else if (op === 'set_name') {
-      p.name = String(p.name ?? '').trim().slice(0, 100);
-      if (!p.name) return { error: 'informe o novo nome do grupo' };
-    } else if (op === 'set_description') {
-      p.description = String(p.description ?? '').slice(0, 2000); // vazio = limpar descricao
-    } else if (op === 'set_picture') {
-      if (!p.media_path) return { error: 'envie a imagem' };
-    } else if (op === 'set_settings') {
-      p.settings = sanitizeSettings(p.settings);
-      if (Object.keys(p.settings).length === 0) return { error: 'escolha ao menos uma configuracao' };
-    } else if (op === 'set_group') {
-      // Acao combinada: cada campo presente = uma alteracao a aplicar.
-      // Campo ausente = nao mexe. Ao menos uma alteracao e obrigatoria.
-      const changes = [];
-      if (typeof p.name === 'string') {
-        p.name = p.name.trim().slice(0, 100);
-        if (!p.name) return { error: 'o novo nome nao pode ficar vazio' };
-        changes.push('name');
-      }
-      if (typeof p.description === 'string') {
-        p.description = p.description.slice(0, 2000); // vazio = limpar
-        changes.push('description');
-      }
-      if (p.media_path) changes.push('picture');
-      if (p.settings) {
-        p.settings = sanitizeSettings(p.settings);
-        if (Object.keys(p.settings).length) changes.push('settings');
-        else delete p.settings;
-      }
-      if (changes.length === 0) {
-        return { error: 'escolha ao menos uma alteracao (nome, descricao, imagem ou configuracoes)' };
-      }
+    } else if (GROUP_OPS.has(op)) {
+      const err = validateGroupParams(op, p);
+      if (err) return { error: err };
     } else if (op === 'create_groups') {
       const err = prepareCreateGroups(p, createItems);
       if (err) return { error: err };
@@ -178,6 +213,146 @@ export function createBulk(db, wa) {
     // Agendado: o tick dispara na hora. Imediato: processa agora.
     if (status === 'running') drain().catch((e) => console.error('[bulk] drain:', e?.message));
     return { id: jobId, scheduled: status === 'scheduled', run_at: runAt };
+  }
+
+  // --- CRUD dos modelos recorrentes ---
+
+  // Valida o corpo de um recorrente (criar/editar). Devolve {error} ou os
+  // campos ja normalizados e prontos para gravar.
+  function parseRecurring(body) {
+    const { name, op, groups, params, recur_dow, recur_time, recur_week_parity } = body ?? {};
+
+    // So EDICAO de grupo e recorrente. Membros/criacao ficam de fora: readicionar
+    // as mesmas pessoas toda semana e caminho curto para denuncia, e criar em
+    // serie duplicaria grupos sem fim.
+    if (!GROUP_OPS.has(op)) {
+      return { error: 'apenas edicao de grupos pode ser recorrente (nome, descricao, imagem ou configuracoes)' };
+    }
+    const grps = Array.isArray(groups)
+      ? groups
+          .filter((g) => g && typeof g.jid === 'string' && g.jid.endsWith('@g.us'))
+          .map((g) => ({ jid: g.jid, name: g.name ?? null }))
+      : [];
+    if (grps.length === 0) return { error: 'selecione ao menos um grupo' };
+
+    const p = { ...(params ?? {}) };
+    p.pace = PACE[p.pace] ? p.pace : 'normal';
+    const err = validateGroupParams(op, p);
+    if (err) return { error: err };
+
+    if (!Number.isInteger(recur_dow) || recur_dow < 0 || recur_dow > 6) {
+      return { error: 'dia da semana (0-6) obrigatorio' };
+    }
+    if (typeof recur_time !== 'string' || !/^\d{2}:\d{2}$/.test(recur_time)) {
+      return { error: 'horario HH:MM obrigatorio' };
+    }
+    if (recur_week_parity != null && !['odd', 'even'].includes(recur_week_parity)) {
+      return { error: 'paridade da semana deve ser "odd", "even" ou ausente' };
+    }
+    const wk = parityToCols(recur_week_parity);
+
+    // Criado hoje, no dia e semana que batem, com a hora ja passada: marca como
+    // "rodado hoje" para nao disparar retroativamente no ato da criacao.
+    const now = new Date();
+    const hhmm = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
+    const lastRun =
+      now.getDay() === recur_dow && weekAllows(wk, now) && hhmm >= recur_time ? localDate(now) : null;
+
+    return {
+      name: typeof name === 'string' && name.trim() ? name.trim().slice(0, 120) : null,
+      op,
+      groups_json: JSON.stringify(grps),
+      params_json: JSON.stringify(p),
+      recur_dow,
+      recur_time,
+      ...wk,
+      last_run_at: lastRun,
+    };
+  }
+
+  function createRecurring(body) {
+    const r = parseRecurring(body);
+    if (r.error) return r;
+    const res = db
+      .prepare(
+        `INSERT INTO bulk_recurring
+           (name, op, groups_json, params_json, recur_dow, recur_time,
+            recur_week_mod, recur_week_rem, last_run_at, status, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,'active',?)`
+      )
+      .run(
+        r.name, r.op, r.groups_json, r.params_json, r.recur_dow, r.recur_time,
+        r.recur_week_mod, r.recur_week_rem, r.last_run_at, new Date().toISOString()
+      );
+    return { id: res.lastInsertRowid };
+  }
+
+  function updateRecurring(id, body) {
+    const cur = db.prepare('SELECT id FROM bulk_recurring WHERE id = ?').get(id);
+    if (!cur) return { error: 'not_found' };
+    const r = parseRecurring(body);
+    if (r.error) return r;
+    db.prepare(
+      `UPDATE bulk_recurring SET
+         name = ?, op = ?, groups_json = ?, params_json = ?, recur_dow = ?, recur_time = ?,
+         recur_week_mod = ?, recur_week_rem = ?, last_run_at = ?, status = 'active'
+       WHERE id = ?`
+    ).run(
+      r.name, r.op, r.groups_json, r.params_json, r.recur_dow, r.recur_time,
+      r.recur_week_mod, r.recur_week_rem, r.last_run_at, id
+    );
+    return { ok: true };
+  }
+
+  // Lista os modelos com a paridade ja no formato da API e um resumo da ultima
+  // execucao (o job mais recente gerado por cada um).
+  function listRecurring() {
+    return db
+      .prepare('SELECT * FROM bulk_recurring ORDER BY id DESC')
+      .all()
+      .map((r) => {
+        const lastJob = db
+          .prepare('SELECT id, status, ok, failed, skipped, total, finished_at FROM bulk_jobs WHERE recurring_id = ? ORDER BY id DESC LIMIT 1')
+          .get(r.id);
+        return {
+          ...r,
+          groups: safeArr(r.groups_json),
+          params: safeObj(r.params_json),
+          groups_json: undefined,
+          params_json: undefined,
+          recur_week_parity: colsToParity(r),
+          last_job: lastJob ?? null,
+        };
+      });
+  }
+
+  // Pausa/retoma. Pausado nao dispara, mas o modelo e o historico ficam.
+  function setRecurringStatus(id, status) {
+    if (!['active', 'paused', 'canceled'].includes(status)) return { error: 'status invalido' };
+    const r = db.prepare('SELECT id FROM bulk_recurring WHERE id = ?').get(id);
+    if (!r) return { error: 'not_found' };
+    db.prepare('UPDATE bulk_recurring SET status = ? WHERE id = ?').run(status, id);
+    return { ok: true };
+  }
+
+  // Apaga o modelo. Os jobs ja executados FICAM (historico), apenas soltos.
+  function deleteRecurring(id) {
+    const r = db.prepare('SELECT id FROM bulk_recurring WHERE id = ?').get(id);
+    if (!r) return { error: 'not_found' };
+    db.prepare('UPDATE bulk_jobs SET recurring_id = NULL WHERE recurring_id = ?').run(id);
+    db.prepare('DELETE FROM bulk_recurring WHERE id = ?').run(id);
+    return { ok: true };
+  }
+
+  // Dispara o modelo agora, fora da agenda (botao "Executar agora"). Nao mexe
+  // no last_run_at: a execucao semanal normal continua valendo.
+  function runRecurringNow(id) {
+    const rec = db.prepare('SELECT * FROM bulk_recurring WHERE id = ?').get(id);
+    if (!rec) return { error: 'not_found' };
+    const res = spawnFromRecurring(rec);
+    if (res.error) return res;
+    drain().catch((e) => console.error('[bulk] drain:', e?.message));
+    return { id: res.id };
   }
 
   function list() {
@@ -582,10 +757,61 @@ export function createBulk(db, wa) {
       .run(canceled ? 'canceled' : 'done', now, jobId);
   }
 
-  return { enqueue, list, detail, cancel, start, stop };
+  return {
+    enqueue, list, detail, cancel, start, stop,
+    // Edicao de grupos recorrente (modelo + execucoes)
+    createRecurring, updateRecurring, listRecurring, setRecurringStatus,
+    deleteRecurring, runRecurringNow,
+  };
 }
 
 // --- Helpers ---
+
+// Valida/normaliza os params de uma operacao de EDICAO de grupo. Muta `p`
+// (os params normalizados sao os gravados) e devolve a mensagem de erro ou null.
+// Compartilhado pelo disparo avulso (enqueue) e pelo modelo recorrente.
+function validateGroupParams(op, p) {
+  if (op === 'set_name') {
+    p.name = String(p.name ?? '').trim().slice(0, 100);
+    if (!p.name) return 'informe o novo nome do grupo';
+    return null;
+  }
+  if (op === 'set_description') {
+    p.description = String(p.description ?? '').slice(0, 2000); // vazio = limpar descricao
+    return null;
+  }
+  if (op === 'set_picture') {
+    if (!p.media_path) return 'envie a imagem';
+    return null;
+  }
+  if (op === 'set_settings') {
+    p.settings = sanitizeSettings(p.settings);
+    if (Object.keys(p.settings).length === 0) return 'escolha ao menos uma configuracao';
+    return null;
+  }
+  // set_group: acao combinada. Cada campo presente = uma alteracao a aplicar;
+  // campo ausente = nao mexe. Ao menos uma alteracao e obrigatoria.
+  const changes = [];
+  if (typeof p.name === 'string') {
+    p.name = p.name.trim().slice(0, 100);
+    if (!p.name) return 'o novo nome nao pode ficar vazio';
+    changes.push('name');
+  }
+  if (typeof p.description === 'string') {
+    p.description = p.description.slice(0, 2000); // vazio = limpar
+    changes.push('description');
+  }
+  if (p.media_path) changes.push('picture');
+  if (p.settings) {
+    p.settings = sanitizeSettings(p.settings);
+    if (Object.keys(p.settings).length) changes.push('settings');
+    else delete p.settings;
+  }
+  if (changes.length === 0) {
+    return 'escolha ao menos uma alteracao (nome, descricao, imagem ou configuracoes)';
+  }
+  return null;
+}
 
 // Valida/normaliza os params do create_groups e gera um item por grupo a criar.
 // `{x}` no nome vira o numero sequencial a partir de `start` (definido pelo
@@ -692,4 +918,21 @@ function safeObj(s) {
   } catch {
     return {};
   }
+}
+
+// Array a partir do JSON; [] se ausente/invalido.
+function safeArr(s) {
+  try {
+    const v = JSON.parse(s ?? '[]');
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
+const pad2 = (n) => String(n).padStart(2, '0');
+
+// Data local YYYY-MM-DD (para a trava de um disparo por dia).
+function localDate(d) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }

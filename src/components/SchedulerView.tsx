@@ -19,7 +19,7 @@ import {
   updateSchedule,
 } from "../lib/api";
 import { StepDraft, draftFromStored, newStep, stepDraftToApi, StepSequenceEditor } from "./StepEditor";
-import { fmtDate, isoWeek, isoWeeksInYear, nextRuns } from "../lib/weeks";
+import { RecurPreview } from "./RecurPreview";
 import { GroupPicker } from "./GroupPicker";
 import { usePager, Pager } from "./Pager";
 
@@ -513,49 +513,5 @@ function ScheduleForm({
         </button>
       </div>
     </form>
-  );
-}
-
-// Preview do recorrente. Mostra a semana ISO de hoje (o mesmo número que o
-// Google Agenda exibe) e as próximas datas de disparo — é o que evita o
-// usuário marcar "ímpares" achando que a semana corrente é outra.
-function RecurPreview({ dow, time, parity }: { dow: number; time: string; parity: WeekParity | null }) {
-  const now = new Date();
-  const { isoYear, week } = isoWeek(now);
-  const next = nextRuns(dow, parity, 3, now);
-  // Ano ISO de 53 semanas: a semana 53 é ímpar e a semana 1 seguinte também,
-  // então "ímpares" dispara em duas semanas seguidas na virada.
-  const long53 = parity !== null && isoWeeksInYear(isoYear) === 53;
-
-  return (
-    <div className="muted small">
-      <p>
-        Hoje é a <b>semana {week}</b> ({week % 2 === 1 ? "ímpar" : "par"}). Será enviada{" "}
-        {parity === null ? (
-          <>toda <b>{DOW[dow]}</b></>
-        ) : (
-          <><b>{DOW[dow]}</b> de semanas <b>{parity === "odd" ? "ímpares" : "pares"}</b></>
-        )}{" "}
-        às <b>{time}</b>.
-      </p>
-      {next.length > 0 && (
-        <p>
-          Próximos envios:{" "}
-          {next.map((r, i) => (
-            <span key={i}>
-              {i > 0 ? " · " : ""}
-              <b>{fmtDate(r.date)}</b> (semana {r.week})
-            </span>
-          ))}
-        </p>
-      )}
-      {long53 && (
-        <p>
-          Atenção: {isoYear} tem 53 semanas. Na virada do ano, a semana 53 e a semana 1
-          seguinte são <b>ambas ímpares</b> — um agendamento de semanas ímpares dispara em
-          duas semanas seguidas (e o de pares fica três semanas sem disparar).
-        </p>
-      )}
-    </div>
   );
 }

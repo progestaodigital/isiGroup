@@ -353,6 +353,45 @@ async function route(req, res, url) {
   if (match('GET', '/bulk')) {
     return json(res, 200, { jobs: bulk.list() });
   }
+  // Edicao de grupos recorrente (modelo semanal + paridade de semana).
+  // Declaradas ANTES de /bulk/:id — "recurring" nao casa com \d+, mas a ordem
+  // deixa explicito que sao rotas irmas e nao um job de id "recurring".
+  if (match('POST', '/bulk/recurring')) {
+    const r = bulk.createRecurring(await readJson(req));
+    if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
+    return json(res, 201, { id: r.id });
+  }
+  if (match('GET', '/bulk/recurring')) {
+    return json(res, 200, { recurring: bulk.listRecurring() });
+  }
+  const recId = path.match(/^\/bulk\/recurring\/(\d+)$/);
+  if (method === 'PUT' && recId) {
+    const r = bulk.updateRecurring(Number(recId[1]), await readJson(req));
+    if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
+    return json(res, 200, { ok: true });
+  }
+  if (method === 'DELETE' && recId) {
+    const r = bulk.deleteRecurring(Number(recId[1]));
+    if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    return json(res, 200, { ok: true });
+  }
+  const recStatus = path.match(/^\/bulk\/recurring\/(\d+)\/status$/);
+  if (method === 'POST' && recStatus) {
+    const b = await readJson(req);
+    const r = bulk.setRecurringStatus(Number(recStatus[1]), b?.status);
+    if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
+    return json(res, 200, { ok: true });
+  }
+  const recRun = path.match(/^\/bulk\/recurring\/(\d+)\/run$/);
+  if (method === 'POST' && recRun) {
+    const r = bulk.runRecurringNow(Number(recRun[1]));
+    if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
+    return json(res, 201, { id: r.id });
+  }
+
   const bulkDetail = path.match(/^\/bulk\/(\d+)$/);
   if (method === 'GET' && bulkDetail) {
     const d = bulk.detail(Number(bulkDetail[1]));
