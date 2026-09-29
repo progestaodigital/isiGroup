@@ -4,9 +4,9 @@
 // Ciclo de vida (spawn/supervise/kill) e responsabilidade do core Rust.
 
 import { createServer } from 'node:http';
-import { dirname, join } from 'node:path';
+import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { rmSync, existsSync, readFileSync } from 'node:fs';
+import { rmSync, existsSync, readFileSync, copyFileSync } from 'node:fs';
 import { openDatabase } from './src/db.mjs';
 import { createWhatsApp } from './src/whatsapp.mjs';
 import { createScheduler } from './src/scheduler.mjs';
@@ -398,6 +398,12 @@ async function route(req, res, url) {
     if (!d) return json(res, 404, { error: 'not_found' });
     return json(res, 200, d);
   }
+  if (method === 'PUT' && bulkDetail) {
+    const r = bulk.updateJob(Number(bulkDetail[1]), await readJson(req));
+    if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
+    return json(res, 200, { ok: true, run_at: r.run_at });
+  }
   const bulkCancel = path.match(/^\/bulk\/(\d+)\/cancel$/);
   if (method === 'POST' && bulkCancel) {
     const r = bulk.cancel(Number(bulkCancel[1]));
@@ -688,6 +694,36 @@ function parseScheduleInput(body) {
   };
 }
 
+// Garante que o arquivo de midia seja EXCLUSIVO deste agendamento.
+//
+// Duplicar um agendamento copia os passos, e os passos carregam o caminho do
+// arquivo. Se dois agendamentos apontassem para o mesmo arquivo, apagar um
+// deles apagaria a midia do outro (deleteSchedule/updateSchedule removem do
+// disco). Entao: caminho ja usado por OUTRO agendamento => copia o arquivo e
+// usa a copia. Custa disco, mas cada agendamento passa a ser independente.
+function ownMediaPath(path, scheduleId) {
+  if (!path) return path;
+  const usedByOther = db
+    .prepare(
+      `SELECT 1 FROM schedule_steps WHERE media_path = ? AND schedule_id != ?
+       UNION ALL
+       SELECT 1 FROM media_assets  WHERE path       = ? AND schedule_id != ?
+       LIMIT 1`
+    )
+    .get(path, scheduleId, path, scheduleId);
+  if (!usedByOther) return path;
+
+  const copy = join(mediaDir, `${Date.now()}-${Math.floor(Math.random() * 1e6)}${extname(path)}`);
+  try {
+    copyFileSync(path, copy);
+    return copy;
+  } catch (e) {
+    // Origem sumiu: mantem o caminho original em vez de perder a referencia.
+    console.error(`[sched] nao foi possivel copiar a midia ${path}: ${e?.message}`);
+    return path;
+  }
+}
+
 // Insere os passos/midia/alvos de um agendamento (compartilhado por create/update).
 function writeScheduleRows(scheduleId, p) {
   if (p.richSteps) {
@@ -701,7 +737,7 @@ function writeScheduleRows(scheduleId, p) {
     p.richSteps.forEach((s, idx) =>
       insStep.run(
         scheduleId, idx, s.payload_type, s.body_json,
-        s.media?.stored_path ?? null,
+        ownMediaPath(s.media?.stored_path ?? null, scheduleId),
         s.media?.mimetype ?? null,
         s.media?.kind ?? null,
         s.media?.duration_seconds ?? null,
@@ -723,7 +759,7 @@ function writeScheduleRows(scheduleId, p) {
        VALUES (?,?,?,?,?,?)`
     ).run(
       scheduleId,
-      p.media.stored_path,
+      ownMediaPath(p.media.stored_path, scheduleId),
       p.media.mimetype ?? null,
       p.media.kind ?? p.payloadType,
       p.media.duration_seconds ?? null,

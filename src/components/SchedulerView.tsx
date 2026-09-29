@@ -63,6 +63,9 @@ export function SchedulerView({ isPro }: { isPro: boolean }) {
   const [schedules, setSchedules] = useState<ScheduleRow[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<ScheduleDetail | null>(null);
+  // "edit" salva por cima do original; "duplicate" usa o mesmo preenchimento
+  // mas cria um agendamento NOVO, deixando o original intacto.
+  const [mode, setMode] = useState<"edit" | "duplicate">("edit");
 
   const refresh = useCallback(async () => {
     const { schedules } = await listSchedules();
@@ -76,16 +79,20 @@ export function SchedulerView({ isPro }: { isPro: boolean }) {
     return () => window.clearInterval(t);
   }, [refresh]);
 
-  async function startEdit(id: number) {
+  async function open(id: number, how: "edit" | "duplicate") {
     try {
       const detail = await getScheduleDetail(id);
+      setMode(how);
       setEditing(detail);
       setShowForm(true);
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (e) {
-      alert("Não foi possível abrir este agendamento para edição.\n" + String(e));
+      const acao = how === "edit" ? "abrir este agendamento para edição" : "duplicar este agendamento";
+      alert("Não foi possível " + acao + ".\n" + String(e));
     }
   }
+  const startEdit = (id: number) => open(id, "edit");
+  const startDuplicate = (id: number) => open(id, "duplicate");
 
   const once = schedules.filter((s) => s.kind === "once");
   const recurring = schedules.filter((s) => s.kind === "recurring");
@@ -99,7 +106,7 @@ export function SchedulerView({ isPro }: { isPro: boolean }) {
         </div>
         <button
           onClick={() => {
-            if (editing) { setEditing(null); setShowForm(true); }
+            if (editing) { setEditing(null); setMode("edit"); setShowForm(true); }
             else setShowForm((v) => !v);
           }}
         >
@@ -109,23 +116,25 @@ export function SchedulerView({ isPro }: { isPro: boolean }) {
 
       {showForm && (
         <ScheduleForm
-          key={editing?.schedule.id ?? "new"}
+          key={`${mode}-${editing?.schedule.id ?? "new"}`}
           targets={targets}
           isPro={isPro}
           editing={editing}
+          intent={mode}
           onCreated={() => {
             setShowForm(false);
             setEditing(null);
+            setMode("edit");
             refresh();
           }}
         />
       )}
 
       <h2 className="section-title">Disparo único</h2>
-      <ScheduleList rows={once} onChange={refresh} onEdit={startEdit} />
+      <ScheduleList rows={once} onChange={refresh} onEdit={startEdit} onDuplicate={startDuplicate} />
 
       <h2 className="section-title">Recorrentes</h2>
-      <ScheduleList rows={recurring} onChange={refresh} onEdit={startEdit} recurring />
+      <ScheduleList rows={recurring} onChange={refresh} onEdit={startEdit} onDuplicate={startDuplicate} recurring />
     </div>
   );
 }
@@ -134,11 +143,13 @@ function ScheduleList({
   rows,
   onChange,
   onEdit,
+  onDuplicate,
   recurring,
 }: {
   rows: ScheduleRow[];
   onChange: () => void;
   onEdit: (id: number) => void;
+  onDuplicate: (id: number) => void;
   recurring?: boolean;
 }) {
   const { slice, page, pageCount, setPage } = usePager(rows);
@@ -178,6 +189,7 @@ function ScheduleList({
                 {canEdit && (
                   <button className="link subtle" onClick={() => onEdit(s.id)}>Editar</button>
                 )}
+                <button className="link subtle" onClick={() => onDuplicate(s.id)}>Duplicar</button>
                 {canCancel && (
                   <button className="link subtle" onClick={async () => { await cancelSchedule(s.id); onChange(); }}>Cancelar</button>
                 )}
@@ -196,19 +208,31 @@ function ScheduleForm({
   targets,
   isPro,
   editing,
+  intent = "edit",
   onCreated,
 }: {
   targets: Target[];
   isPro: boolean;
   editing?: ScheduleDetail | null;
+  // "duplicate" preenche a partir de `editing` mas CRIA um novo agendamento.
+  intent?: "edit" | "duplicate";
   onCreated: () => void;
 }) {
+  const dup = intent === "duplicate" && !!editing;
+  // Editando de verdade (salva por cima). Duplicando, o original fica intacto.
+  const editando = !!editing && !dup;
   const ivMin = editing ? secToUnit(editing.schedule.step_min_s) : null;
   const ivMax = editing ? secToUnit(editing.schedule.step_max_s) : null;
 
-  const [name, setName] = useState(editing?.schedule.name ?? "");
+  const [name, setName] = useState(
+    editing ? `${editing.schedule.name ?? "Sem título"}${dup ? " (cópia)" : ""}` : ""
+  );
   const [kind, setKind] = useState<ScheduleKind>(editing?.schedule.kind ?? "once");
-  const [when, setWhen] = useState(editing?.schedule.kind === "once" ? isoToLocalInput(editing.schedule.scheduled_at) : "");
+  // Na cópia de um disparo único a data fica em branco de propósito: a do
+  // original já passou, e escolher a nova é uma decisão consciente.
+  const [when, setWhen] = useState(
+    !dup && editing?.schedule.kind === "once" ? isoToLocalInput(editing.schedule.scheduled_at) : ""
+  );
   const [dow, setDow] = useState(editing?.schedule.recur_dow ?? 1);
   const [time, setTime] = useState(editing?.schedule.recur_time ?? "19:00");
   // Filtro opcional de paridade da semana ISO. "" = toda semana (padrão).
@@ -346,7 +370,7 @@ function ScheduleForm({
         account_ids: multiChip ? [...selectedChips] : undefined,
       };
       const built = await buildTargets();
-      const editId = editing?.schedule.id ?? null;
+      const editId = editando ? editing!.schedule.id : null;
       const save = (payload: Parameters<typeof createSchedule>[0]) =>
         editId != null ? updateSchedule(editId, payload) : createSchedule(payload);
 
@@ -384,14 +408,24 @@ function ScheduleForm({
 
   return (
     <form className="card form" onSubmit={submit}>
-      {editing && <p className="muted small">Editando <b>{editing.schedule.name || "(sem título)"}</b>. As alterações substituem o conteúdo e reagendam o disparo.</p>}
+      {editando && (
+        <p className="muted small">
+          Editando <b>{editing!.schedule.name || "(sem título)"}</b>. As alterações substituem o conteúdo e reagendam o disparo.
+        </p>
+      )}
+      {dup && (
+        <p className="muted small">
+          Duplicando <b>{editing!.schedule.name || "(sem título)"}</b>. Será criado um agendamento <b>novo</b> — o original
+          fica intacto. {kind === "once" ? "Escolha a data e hora do novo disparo." : "Confira o dia e o horário abaixo."}
+        </p>
+      )}
       <div className="field">
         <span>Tipo de disparo</span>
         <div className="seg">
-          <button type="button" className={kind === "once" ? "on" : ""} disabled={!!editing} onClick={() => setKind("once")}>Único</button>
-          <button type="button" className={kind === "recurring" ? "on" : ""} disabled={!!editing} onClick={() => setKind("recurring")}>Recorrente (semanal)</button>
+          <button type="button" className={kind === "once" ? "on" : ""} disabled={editando} onClick={() => setKind("once")}>Único</button>
+          <button type="button" className={kind === "recurring" ? "on" : ""} disabled={editando} onClick={() => setKind("recurring")}>Recorrente (semanal)</button>
         </div>
-        {editing && <span className="hint">O tipo de disparo não muda na edição — crie um novo para trocar.</span>}
+        {editando && <span className="hint">O tipo de disparo não muda na edição — crie um novo para trocar.</span>}
       </div>
 
       <div className="field-row">
@@ -509,7 +543,9 @@ function ScheduleForm({
       {err && <p className="error">{err}</p>}
       <div className="gate-actions" style={{ justifyContent: "flex-start" }}>
         <button type="submit" disabled={busy || uploadingAny}>
-          {busy ? (editing ? "Salvando…" : "Agendando…") : editing ? "Salvar alterações" : "Agendar"}
+          {busy
+            ? editando ? "Salvando…" : "Agendando…"
+            : editando ? "Salvar alterações" : dup ? "Agendar cópia" : "Agendar"}
         </button>
       </div>
     </form>

@@ -1,15 +1,19 @@
-## isiGroup v0.2.1
+## isiGroup v0.2.2
 
-### Edição de grupos agora pode ser recorrente
-Antes, editar vários grupos de uma vez era sempre um disparo único — na hora ou agendado para uma data. Agora dá para deixar a edição rodando **toda semana**, sozinha.
+### Duplicar mensagens agendadas
+Todo agendamento — único ou recorrente, inclusive os que já foram enviados — ganhou o botão **Duplicar**, ao lado de Editar.
 
-- Em **Ações em massa → Editar grupos**, o disparo ganhou uma terceira opção: **Recorrente**.
-- Você escolhe o **dia da semana**, o **horário** e, se quiser, se vale **só em semanas ímpares**, **só em semanas pares** ou em **todas** — a mesma regra de semana do agendamento de mensagens.
-- A tela mostra em que semana você está e as próximas datas, para não restar dúvida na hora de escolher.
-- Funciona com qualquer alteração: nome, descrição, imagem e configurações do grupo.
-- Um bloco **Edições recorrentes** lista tudo que está no ar, com o resumo da última execução. Dá para **pausar e retomar**, **executar na hora** (fora da agenda) e **remover**.
-- Remover uma edição recorrente **mantém o histórico** das execuções já feitas.
-- Cada disparo semanal vira uma execução própria na lista de Execuções, com o resultado grupo a grupo — nada sobrescreve a rodada anterior.
-- Se o computador estiver desligado no horário e você abrir o app mais tarde no mesmo dia, a edição ainda roda. No máximo uma vez por dia.
+- Abre o formulário já preenchido: mesmos grupos, mesma sequência de mensagens, mesmos chips e o mesmo intervalo entre os passos.
+- Ao salvar, é criado um agendamento **novo**. O original continua exatamente como estava.
+- O título da cópia vem com **(cópia)** para você não confundir os dois na lista.
+- Num disparo único, a **data vem em branco** de propósito: a do original já passou, e herdá-la faria a cópia disparar na hora. Em recorrente, o dia, o horário e a regra de semana par/ímpar vêm preenchidos.
+- Na cópia você pode trocar o tipo de disparo — dá para duplicar um recorrente como disparo único, por exemplo.
+- Cada cópia passa a ter a **sua própria imagem/áudio/vídeo**. Apagar o agendamento original não afeta a mídia da cópia.
 
-**Só a edição de grupos pode ser recorrente.** Adicionar/remover membros e criar grupos em série seguem como disparo único, de propósito: repetir essas ações toda semana é o caminho mais curto para denúncia e banimento da conta.
+### Editar ações em massa já agendadas
+Antes, uma ação em massa agendada só podia ser cancelada. Agora dá para corrigir sem refazer do zero.
+
+- **Edições recorrentes** ganharam o botão **Editar**: muda grupos, o que será alterado, o ritmo, o dia da semana, a regra de semana par/ímpar e o horário.
+- **Ações agendadas** para uma data (na lista de Execuções) também ganharam **Editar**: muda grupos, contatos, o que a ação faz e a data.
+- Só é possível editar o que ainda **não começou a rodar**. Uma ação em andamento ou concluída tem o resultado de cada grupo registrado, e reescrever isso apagaria o histórico — nesses casos o caminho continua sendo cancelar e criar outra.
+- Editar aplica as mesmas regras de quando você cria, incluindo os limites de segurança: não dá para passar do teto de adições editando uma ação depois de criada.

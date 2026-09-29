@@ -24,6 +24,8 @@ import {
   listTargets,
   runBulkRecurringNow,
   setBulkRecurringStatus,
+  updateBulkJob,
+  updateBulkRecurring,
   uploadMedia,
 } from "../lib/api";
 import { GroupPicker } from "./GroupPicker";
@@ -79,6 +81,34 @@ export function BulkActionsView() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [jobs, setJobs] = useState<BulkJobRow[]>([]);
   const [recurring, setRecurring] = useState<BulkRecurringRow[]>([]);
+  const [editing, setEditing] = useState<BulkEditTarget | null>(null);
+
+  // Abre um disparo agendado no formulário. Os grupos/contatos vivem nos itens,
+  // então busca o detalhe antes de entrar em modo edição.
+  const startEditJob = useCallback(async (job: BulkJobRow) => {
+    const d = await getBulkJob(job.id);
+    const byJid = new Map<string, string | null>();
+    const contatos = new Set<string>();
+    for (const it of d.items) {
+      byJid.set(it.group_jid, it.group_name);
+      if (it.contact) contatos.add(it.contact);
+    }
+    setEditing({
+      kind: "job",
+      id: job.id,
+      op: job.op,
+      params: job.params,
+      run_at: job.run_at,
+      groups: [...byJid].map(([jid, name]) => ({ jid, name })),
+      contacts: [...contatos],
+    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, []);
+
+  const startEditRecurring = useCallback((row: BulkRecurringRow) => {
+    setEditing({ kind: "recurring", id: row.id, row });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, []);
 
   // Atualiza grupos (nomes podem mudar após um rename em massa), chips, jobs
   // e os modelos de edição recorrente.
@@ -128,33 +158,108 @@ export function BulkActionsView() {
         <b>⚠ Ações em massa têm alto risco de banimento.</b> Use com moderação.
       </div>
 
-      <BulkForm adminGroups={adminGroups} accounts={accounts} onCreated={refresh} />
+      {/* key força o remonte ao trocar o alvo: todo o estado inicial vem do
+          `editing`, então reusar a instância deixaria campos do anterior. */}
+      <BulkForm
+        key={editing ? `${editing.kind}-${editing.id}` : "novo"}
+        adminGroups={adminGroups}
+        accounts={accounts}
+        editing={editing}
+        onCreated={() => {
+          setEditing(null);
+          refresh();
+        }}
+        onCancelEdit={() => setEditing(null)}
+      />
 
       {recurring.length > 0 && (
         <>
           <h2 className="section-title">Edições recorrentes</h2>
-          <RecurringList rows={recurring} onChanged={refresh} />
+          <RecurringList rows={recurring} onChanged={refresh} onEdit={startEditRecurring} />
         </>
       )}
 
       <h2 className="section-title">Execuções</h2>
-      <JobsList jobs={jobs} onChanged={refresh} />
+      <JobsList jobs={jobs} onChanged={refresh} onEdit={startEditJob} />
     </div>
   );
+}
+
+// Alvo em edição: um modelo recorrente ou um disparo único ainda agendado.
+// Em ambos os casos `groups` já vem resolvido em jids (o formulário mapeia
+// para os ids dos grupos sincronizados).
+export type BulkEditTarget =
+  | { kind: "recurring"; id: number; row: BulkRecurringRow }
+  | {
+      kind: "job";
+      id: number;
+      op: BulkOp;
+      params: BulkParams;
+      run_at: string | null;
+      groups: Array<{ jid: string; name: string | null }>;
+      contacts: string[];
+    };
+
+// Estado inicial dos campos de edição de grupo a partir dos params gravados:
+// campo presente = alteração ligada. Espelha o que o motor considera mudança.
+function editInit(params: BulkParams | undefined) {
+  const p = params ?? {};
+  const st = p.settings ?? {};
+  return {
+    chName: typeof p.name === "string",
+    newName: typeof p.name === "string" ? p.name : "",
+    chDesc: typeof p.description === "string",
+    newDesc: typeof p.description === "string" ? p.description : "",
+    chPic: !!p.media_path,
+    chSettings: !!(p.settings && Object.keys(p.settings).length),
+    announce: (st.announce ?? "keep") as Tri,
+    editInfo: (st.edit ?? "keep") as Tri,
+    addMode: (st.add ?? "keep") as Tri,
+    approval: (st.approval ?? "keep") as TriApproval,
+    pace: (p.pace ?? "normal") as BulkPace,
+  };
+}
+
+// Converte um ISO em valor de <input type="datetime-local"> na hora local.
+function isoToLocalInput(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const p2 = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}T${p2(d.getHours())}:${p2(d.getMinutes())}`;
 }
 
 function BulkForm({
   adminGroups,
   accounts,
+  editing,
   onCreated,
+  onCancelEdit,
 }: {
   adminGroups: Target[];
   accounts: Account[];
+  editing?: BulkEditTarget | null;
   onCreated: () => void;
+  onCancelEdit: () => void;
 }) {
-  const [op, setOp] = useState<BulkOp>("add_members");
-  const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [contactsText, setContactsText] = useState("");
+  // Params/grupos de origem quando está editando (os dois formatos convergem).
+  const edParams = editing ? (editing.kind === "recurring" ? editing.row.params : editing.params) : undefined;
+  const edGroups = editing ? (editing.kind === "recurring" ? editing.row.groups : editing.groups) : [];
+  const ini = editInit(edParams);
+
+  const [op, setOp] = useState<BulkOp>(
+    editing ? (editing.kind === "recurring" ? editing.row.op : editing.op) : "add_members"
+  );
+  // Grupos gravados vêm por jid; a seleção da tela trabalha com o id do alvo.
+  const [selected, setSelected] = useState<Set<number>>(() => {
+    if (!editing) return new Set();
+    const byJid = new Map(adminGroups.map((g) => [g.jid, g.id]));
+    const ids = edGroups.map((g) => byJid.get(g.jid)).filter((n): n is number => typeof n === "number");
+    return new Set(ids);
+  });
+  const [contactsText, setContactsText] = useState(
+    editing && editing.kind === "job" ? editing.contacts.join("\n") : ""
+  );
 
   // Criação de grupos (op = create_groups): nome com {x} = numeração sequencial.
   const [createAcct, setCreateAcct] = useState<number | null>(null);
@@ -166,28 +271,41 @@ function BulkForm({
   const [membersText, setMembersText] = useState("");
 
   // Editor combinado de grupos (op = set_group): cada alteração é opcional.
-  const [chName, setChName] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [chDesc, setChDesc] = useState(false);
-  const [newDesc, setNewDesc] = useState("");
-  const [chPic, setChPic] = useState(false);
-  const [picture, setPicture] = useState<MediaInfo | null>(null);
-  const [picName, setPicName] = useState("");
+  const [chName, setChName] = useState(ini.chName);
+  const [newName, setNewName] = useState(ini.newName);
+  const [chDesc, setChDesc] = useState(ini.chDesc);
+  const [newDesc, setNewDesc] = useState(ini.newDesc);
+  const [chPic, setChPic] = useState(ini.chPic);
+  // Imagem já gravada: mantém o caminho para reenviar sem novo upload.
+  const [picture, setPicture] = useState<MediaInfo | null>(
+    edParams?.media_path ? ({ stored_path: edParams.media_path } as MediaInfo) : null
+  );
+  const [picName, setPicName] = useState(edParams?.media_path ? "imagem atual" : "");
   const [picBusy, setPicBusy] = useState(false);
-  const [chSettings, setChSettings] = useState(false);
-  const [announce, setAnnounce] = useState<Tri>("keep");
-  const [editInfo, setEditInfo] = useState<Tri>("keep");
-  const [addMode, setAddMode] = useState<Tri>("keep");
-  const [approval, setApproval] = useState<TriApproval>("keep");
+  const [chSettings, setChSettings] = useState(ini.chSettings);
+  const [announce, setAnnounce] = useState<Tri>(ini.announce);
+  const [editInfo, setEditInfo] = useState<Tri>(ini.editInfo);
+  const [addMode, setAddMode] = useState<Tri>(ini.addMode);
+  const [approval, setApproval] = useState<TriApproval>(ini.approval);
 
-  const [pace, setPace] = useState<BulkPace>("normal");
-  const [when, setWhen] = useState<"now" | "schedule" | "recurring">("now");
-  const [runAt, setRunAt] = useState("");
+  const [pace, setPace] = useState<BulkPace>(ini.pace);
+  const [when, setWhen] = useState<"now" | "schedule" | "recurring">(
+    editing ? (editing.kind === "recurring" ? "recurring" : "schedule") : "now"
+  );
+  const [runAt, setRunAt] = useState(
+    editing && editing.kind === "job" ? isoToLocalInput(editing.run_at) : ""
+  );
   // Recorrente (só edição de grupos): dia da semana + paridade + horário.
-  const [recName, setRecName] = useState("");
-  const [recDow, setRecDow] = useState(1);
-  const [recTime, setRecTime] = useState("09:00");
-  const [recParity, setRecParity] = useState<WeekParity | "">("");
+  const [recName, setRecName] = useState(
+    editing && editing.kind === "recurring" ? editing.row.name ?? "" : ""
+  );
+  const [recDow, setRecDow] = useState(editing && editing.kind === "recurring" ? editing.row.recur_dow : 1);
+  const [recTime, setRecTime] = useState(
+    editing && editing.kind === "recurring" ? editing.row.recur_time : "09:00"
+  );
+  const [recParity, setRecParity] = useState<WeekParity | "">(
+    editing && editing.kind === "recurring" ? editing.row.recur_week_parity ?? "" : ""
+  );
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -354,15 +472,19 @@ function BulkForm({
       const quando = recParity
         ? `${DOW_LABEL[recDow]} de semanas ${recParity === "odd" ? "ímpares" : "pares"}`
         : `toda ${DOW_LABEL[recDow]}`;
-      if (!confirm(`Criar edição recorrente — ${quando} às ${recTime}, em ${groupJids.length} grupo(s)?`)) return;
+      const editandoRec = editing?.kind === "recurring";
+      const verbo = editandoRec ? "Salvar alterações em" : "Criar";
+      if (!confirm(`${verbo} edição recorrente — ${quando} às ${recTime}, em ${groupJids.length} grupo(s)?`)) return;
       setBusy(true);
       try {
-        const r = await createBulkRecurring(body);
+        const r = editandoRec
+          ? await updateBulkRecurring(editing.id, body)
+          : await createBulkRecurring(body);
         if (r.error) {
-          setErr(r.message ?? "Não foi possível criar.");
+          setErr(r.message ?? "Não foi possível salvar.");
           return;
         }
-        setNote("Edição recorrente criada.");
+        setNote(editandoRec ? "Edição recorrente atualizada." : "Edição recorrente criada.");
         onCreated();
       } catch (e) {
         setErr(e instanceof Error ? e.message : "Falha ao criar.");
@@ -401,14 +523,21 @@ function BulkForm({
       run_at,
     };
 
+    const editandoJob = editing?.kind === "job";
     setBusy(true);
     try {
-      const r = await createBulkJob(payload);
+      const r = editandoJob ? await updateBulkJob(editing.id, payload) : await createBulkJob(payload);
       if (r.error) {
-        setErr(r.message ?? "Não foi possível iniciar a ação.");
+        setErr(r.message ?? (editandoJob ? "Não foi possível salvar." : "Não foi possível iniciar a ação."));
         return;
       }
-      setNote(r.scheduled ? "Ação agendada. Acompanhe abaixo." : "Ação iniciada. Acompanhe o progresso abaixo.");
+      setNote(
+        editandoJob
+          ? "Agendamento atualizado."
+          : "scheduled" in r && r.scheduled
+            ? "Ação agendada. Acompanhe abaixo."
+            : "Ação iniciada. Acompanhe o progresso abaixo."
+      );
       setContactsText("");
       onCreated();
     } catch (e2) {
@@ -753,14 +882,21 @@ function BulkForm({
       {err && <p className="error">{err}</p>}
       {note && <p className="hint">{note}</p>}
       <div className="gate-actions" style={{ justifyContent: "flex-start" }}>
+        {editing && (
+          <button type="button" className="ghost" onClick={onCancelEdit} disabled={busy}>
+            Cancelar edição
+          </button>
+        )}
         <button type="submit" disabled={busy}>
           {busy
             ? "Enviando…"
-            : when === "recurring"
-              ? "Criar edição recorrente"
-              : when === "schedule"
-                ? isCreate ? "Agendar criação" : "Agendar ação"
-                : isCreate ? "Criar grupos" : "Executar ação em massa"}
+            : editing
+              ? "Salvar alterações"
+              : when === "recurring"
+                ? "Criar edição recorrente"
+                : when === "schedule"
+                  ? isCreate ? "Agendar criação" : "Agendar ação"
+                  : isCreate ? "Criar grupos" : "Executar ação em massa"}
         </button>
       </div>
     </form>
@@ -805,7 +941,15 @@ function ApprovalRow({ value, onChange }: { value: TriApproval; onChange: (v: Tr
   );
 }
 
-function JobsList({ jobs, onChanged }: { jobs: BulkJobRow[]; onChanged: () => void }) {
+function JobsList({
+  jobs,
+  onChanged,
+  onEdit,
+}: {
+  jobs: BulkJobRow[];
+  onChanged: () => void;
+  onEdit: (job: BulkJobRow) => void;
+}) {
   const [expanded, setExpanded] = useState<number | null>(null);
   const jobsP = usePager(jobs);
 
@@ -826,6 +970,7 @@ function JobsList({ jobs, onChanged }: { jobs: BulkJobRow[]; onChanged: () => vo
           open={expanded === j.id}
           onToggle={() => setExpanded((v) => (v === j.id ? null : j.id))}
           onChanged={onChanged}
+          onEdit={() => onEdit(j)}
         />
       ))}
       <Pager page={jobsP.page} pageCount={jobsP.pageCount} setPage={jobsP.setPage} />
@@ -838,11 +983,13 @@ function JobRow({
   open,
   onToggle,
   onChanged,
+  onEdit,
 }: {
   job: BulkJobRow;
   open: boolean;
   onToggle: () => void;
   onChanged: () => void;
+  onEdit: () => void;
 }) {
   const [detail, setDetail] = useState<BulkJobDetail | null>(null);
   const pct = job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
@@ -906,6 +1053,13 @@ function JobRow({
       <div className="tags">
         <span className={`tag ${statusTag}`}>{statusText}</span>
         <button className="link subtle" onClick={onToggle}>{open ? "Ocultar" : "Detalhes"}</button>
+        {/* Só agendado é editável: um job em andamento (ou concluído) tem itens
+            com resultado gravado, e reescrevê-los apagaria o que já aconteceu. */}
+        {scheduled && (
+          <button className="link subtle" onClick={onEdit}>
+            Editar
+          </button>
+        )}
         {(running || scheduled) && (
           <button
             className="link subtle danger"
@@ -926,7 +1080,15 @@ function JobRow({
 
 // Lista dos modelos de edição recorrente. Cada linha mostra a regra semanal,
 // a última execução gerada e os controles de pausa / disparo avulso / remoção.
-function RecurringList({ rows, onChanged }: { rows: BulkRecurringRow[]; onChanged: () => void }) {
+function RecurringList({
+  rows,
+  onChanged,
+  onEdit,
+}: {
+  rows: BulkRecurringRow[];
+  onChanged: () => void;
+  onEdit: (row: BulkRecurringRow) => void;
+}) {
   const quando = (r: BulkRecurringRow) =>
     r.recur_week_parity
       ? `${DOW_LABEL[r.recur_dow]} de semanas ${r.recur_week_parity === "odd" ? "ímpares" : "pares"}`
@@ -962,6 +1124,9 @@ function RecurringList({ rows, onChanged }: { rows: BulkRecurringRow[]; onChange
               <span className={`tag ${r.status === "active" ? "ok" : "off"}`}>
                 {r.status === "active" ? "Ativo" : r.status === "paused" ? "Pausado" : "Cancelado"}
               </span>
+              <button className="link subtle" onClick={() => onEdit(r)}>
+                Editar
+              </button>
               <button
                 className="link subtle"
                 onClick={async () => {

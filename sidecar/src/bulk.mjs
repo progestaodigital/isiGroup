@@ -132,7 +132,10 @@ export function createBulk(db, wa) {
 
   // --- API publica (chamada pelas rotas) ---
 
-  function enqueue({ op, groups, contacts, params, run_at }) {
+  // Valida o corpo de um disparo e monta os itens. Compartilhado por enqueue
+  // (criar) e updateJob (editar um agendado) — as duas rotas aplicam
+  // exatamente as mesmas regras, inclusive os limites anti-banimento.
+  function prepareJob({ op, groups, contacts, params, run_at }) {
     if (!MEMBER_OPS.has(op) && !GROUP_OPS.has(op) && op !== 'create_groups') {
       return { error: 'operacao invalida' };
     }
@@ -191,6 +194,14 @@ export function createBulk(db, wa) {
       }
     }
 
+    return { op, p, items, runAt, status, now };
+  }
+
+  function enqueue(body) {
+    const prep = prepareJob(body);
+    if (prep.error) return prep;
+    const { op, p, items, runAt, status, now } = prep;
+
     db.exec('BEGIN;');
     let jobId;
     try {
@@ -213,6 +224,46 @@ export function createBulk(db, wa) {
     // Agendado: o tick dispara na hora. Imediato: processa agora.
     if (status === 'running') drain().catch((e) => console.error('[bulk] drain:', e?.message));
     return { id: jobId, scheduled: status === 'scheduled', run_at: runAt };
+  }
+
+  // Edita um disparo AGENDADO que ainda nao comecou. Reescreve op, params,
+  // grupos/contatos e a data — os itens sao refeitos do zero.
+  //
+  // So 'scheduled' e editavel: um job ja em execucao (ou terminado) tem itens
+  // com resultado gravado, e reescreve-los apagaria o que ja aconteceu. Para
+  // esses o caminho e cancelar e criar outro.
+  function updateJob(id, body) {
+    const job = db.prepare('SELECT id, status, recurring_id FROM bulk_jobs WHERE id = ?').get(id);
+    if (!job) return { error: 'not_found' };
+    if (job.status !== 'scheduled') {
+      return { error: 'so e possivel editar um disparo agendado que ainda nao comecou' };
+    }
+
+    const prep = prepareJob(body);
+    if (prep.error) return prep;
+    const { op, p, items, runAt, status, now } = prep;
+    // Sem data futura o job viraria execucao imediata — nao e "editar um
+    // agendamento", entao exige data explicitamente no futuro.
+    if (status !== 'scheduled' || !runAt) {
+      return { error: 'informe uma data e hora futura para o agendamento' };
+    }
+
+    db.exec('BEGIN;');
+    try {
+      db.prepare(
+        "UPDATE bulk_jobs SET op = ?, params_json = ?, total = ?, run_at = ?, done = 0, ok = 0, failed = 0, skipped = 0 WHERE id = ?"
+      ).run(op, JSON.stringify(p), items.length, runAt, id);
+      db.prepare('DELETE FROM bulk_job_items WHERE job_id = ?').run(id);
+      const ins = db.prepare(
+        'INSERT INTO bulk_job_items (job_id, group_jid, group_name, contact, status, created_at) VALUES (?,?,?,?,?,?)'
+      );
+      for (const it of items) ins.run(id, it.jid, it.name, it.contact, 'pending', now);
+      db.exec('COMMIT;');
+    } catch (e) {
+      db.exec('ROLLBACK;');
+      return { error: e?.message ?? 'erro ao editar' };
+    }
+    return { ok: true, run_at: runAt };
   }
 
   // --- CRUD dos modelos recorrentes ---
@@ -758,7 +809,7 @@ export function createBulk(db, wa) {
   }
 
   return {
-    enqueue, list, detail, cancel, start, stop,
+    enqueue, updateJob, list, detail, cancel, start, stop,
     // Edicao de grupos recorrente (modelo + execucoes)
     createRecurring, updateRecurring, listRecurring, setRecurringStatus,
     deleteRecurring, runRecurringNow,

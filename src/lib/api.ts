@@ -585,6 +585,12 @@ export const createBulkJob = (b: NewBulkJob) =>
   });
 export const listBulkJobs = () => sidecar<{ jobs: BulkJobRow[] }>("/bulk");
 export const getBulkJob = (id: number) => sidecar<BulkJobDetail>(`/bulk/${id}`);
+// Edita um disparo AGENDADO que ainda não começou (o motor recusa os demais).
+export const updateBulkJob = (id: number, b: NewBulkJob) =>
+  sidecar<{ ok?: boolean; run_at?: string; error?: string; message?: string }>(`/bulk/${id}`, {
+    method: "PUT",
+    ...jbody(b),
+  });
 export const cancelBulkJob = (id: number) =>
   sidecar<{ ok?: boolean }>(`/bulk/${id}/cancel`, { method: "POST" });
 
