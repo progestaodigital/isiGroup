@@ -31,6 +31,10 @@ const TICK_MS = 4000;
 const ACTION_TYPES = new Set([
   'create_groups', 'add_members', 'remove_members', 'promote', 'demote',
   'edit_groups', 'schedule', 'automation_rule', 'save_selection',
+  // Tipos usados pela EXPORTACAO da configuracao (ver exporter.mjs). Existem
+  // para que o arquivo exportado seja um isiplan valido — exportar e importar
+  // passam pela mesma validacao de sempre, sem um segundo formato.
+  'ai_agent', 'ai_binding', 'bulk_recurring', 'account_settings',
 ]);
 const MEMBER_OPS = new Set(['add_members', 'remove_members', 'promote', 'demote']);
 const DOW = ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'];
@@ -398,6 +402,110 @@ export function createPlans(db, wa, bulk, { mediaDir, appVersion, editionState }
       return doneStep(runId, step, `seleção "${params.name}" salva (${sel.groups.length} grupo(s))`, { selection_id: res.id });
     }
 
+    // --- Tipos da EXPORTACAO de configuracao ---
+    // Todos executam via selfFetch nos endpoints do proprio app: a importacao
+    // passa pela MESMA validacao que a tela usa, sem caminho paralelo.
+
+    if (step.action_type === 'ai_agent') {
+      const r = await selfFetch('POST', '/ai/agents', {
+        name: params.name, description: params.description, system_prompt: params.system_prompt,
+        model: params.model, keywords: params.keywords, min_similarity: params.min_similarity,
+        use_in_triage: params.use_in_triage, enabled: params.enabled,
+      });
+      if (!r?.id) return failStep(runId, step, r?.message ?? 'falha ao criar o agente');
+
+      // Conhecimento: indexado em segundo plano pelo proprio endpoint. Sem
+      // chave da OpenAI o documento entra e fica com erro visivel na tela —
+      // melhor que perder o texto na importacao.
+      let ok = 0;
+      const falhas = [];
+      for (const k of params.knowledge ?? []) {
+        try {
+          const d = await selfFetch('POST', `/ai/agents/${r.id}/documents`, {
+            source: 'text', title: k.title, content: k.content,
+          });
+          if (d?.id) ok++;
+          else falhas.push(k.title || '(sem título)');
+        } catch (e) {
+          // selfFetch lanca em 4xx/5xx. O caso comum e nao haver chave da
+          // OpenAI nesta maquina: o agente ja foi criado e o passo NAO pode
+          // falhar por isso — falhar aqui descartaria o texto do conhecimento
+          // sem o usuario perceber.
+          falhas.push(`${k.title || '(sem título)'}: ${e?.message ?? 'erro'}`);
+        }
+      }
+      const aviso = falhas.length ? ` — ${falhas.length} bloco(s) não entraram: ${falhas[0]}` : '';
+      return doneStep(runId, step, `agente "${params.name}" criado com ${ok} bloco(s)${aviso}`, { agent_id: r.id });
+    }
+
+    if (step.action_type === 'ai_binding') {
+      const sel = await resolveSelector(runId, params.groups);
+      if (sel.groups.length === 0) {
+        return failStep(runId, step, sel.notes.length ? sel.notes.join('; ') : 'nenhum grupo resolvido', true);
+      }
+      // agent_ref -> id real do agente criado antes neste mesmo plano.
+      let agentId = null;
+      if (params.agent_ref) {
+        const row = db
+          .prepare("SELECT result_json FROM plan_steps WHERE run_id = ? AND action_id = ? ORDER BY order_index LIMIT 1")
+          .get(runId, String(params.agent_ref));
+        agentId = safeObj(row?.result_json).agent_id ?? null;
+        if (!agentId) return failStep(runId, step, `agente de "${params.agent_ref}" não foi criado`);
+      }
+      // Um vinculo por grupo (a tabela guarda um jid por linha).
+      const criados = [];
+      for (const g of sel.groups) {
+        const r = await selfFetch('POST', '/ai/bindings', {
+          target_jid: g.jid, mode: params.mode, agent_id: agentId ?? undefined,
+          trigger_mode: params.trigger_mode, match_type: params.match_type, pattern: params.pattern,
+          case_sensitive: params.case_sensitive, max_hops: params.max_hops, enabled: params.enabled,
+        });
+        if (r?.id) criados.push(g.name);
+      }
+      if (criados.length === 0) return failStep(runId, step, 'nenhum vínculo criado');
+      return doneStep(runId, step, `IA ativada em ${criados.length} grupo(s)`, { groups: sel.groups });
+    }
+
+    if (step.action_type === 'bulk_recurring') {
+      const sel = await resolveSelector(runId, params.groups);
+      if (sel.groups.length === 0) {
+        return failStep(runId, step, sel.notes.length ? sel.notes.join('; ') : 'nenhum grupo resolvido', true);
+      }
+      const edicao = { pace: params.pace };
+      if (params.set_name != null) edicao.name = params.set_name;
+      if (params.set_description != null) edicao.description = params.set_description;
+      if (params.settings) edicao.settings = params.settings;
+      if (params.image?.stored_path) edicao.media_path = params.image.stored_path;
+
+      const r = await selfFetch('POST', '/bulk/recurring', {
+        name: params.name, op: 'set_group',
+        groups: sel.groups.map((g) => ({ jid: g.jid, name: g.name })),
+        params: edicao,
+        recur_dow: params.recur_dow, recur_time: params.recur_time,
+        recur_week_parity: params.recur_week_parity,
+      });
+      if (!r?.id) return failStep(runId, step, r?.message ?? 'falha ao criar a edição recorrente');
+      // Importado como pausado quando o plano dizia desativado.
+      if (params.enabled === false) await selfFetch('POST', `/bulk/recurring/${r.id}/status`, { status: 'paused' });
+      return doneStep(runId, step, `edição recorrente em ${sel.groups.length} grupo(s)`, { recurring_id: r.id });
+    }
+
+    if (step.action_type === 'account_settings') {
+      // Casa pelo ROTULO: o id do chip na maquina de origem nao vale aqui.
+      // Sem correspondencia, nao cria chip nenhum — conectar exige QR.
+      const alvo = db.prepare('SELECT id FROM accounts WHERE label = ? LIMIT 1').get(params.label);
+      if (!alvo) {
+        return doneStep(runId, step, `nenhum chip chamado "${params.label}" nesta máquina — configuração ignorada`);
+      }
+      // So o proxy tem rota (POST /accounts/:id/proxy). O rotulo ja casou —
+      // e por ele que encontramos o chip —, entao nada a renomear.
+      await selfFetch('POST', `/accounts/${alvo.id}/proxy`, {
+        proxy_url: params.proxy_url, proxy_enabled: params.proxy_enabled,
+      });
+      const comProxy = params.proxy_url ? ` com proxy ${params.proxy_enabled ? 'ativo' : 'desativado'}` : ' sem proxy';
+      return doneStep(runId, step, `chip "${params.label}" configurado${comProxy}`);
+    }
+
     return failStep(runId, step, `tipo de ação desconhecido: ${step.action_type}`);
   }
 
@@ -698,6 +806,9 @@ export function createPlans(db, wa, bulk, { mediaDir, appVersion, editionState }
     }
 
     const ids = new Set();
+    // Ids referenciaveis: grupos criados (create_groups, via {"ref"}) e agentes
+    // criados (ai_agent, via agent_ref). Os dois resolvem pelo result_json do
+    // passo, entao compartilham o mesmo conjunto.
     const createIds = new Set();
     const actions = [];
 
@@ -888,6 +999,88 @@ export function createPlans(db, wa, bulk, { mediaDir, appVersion, editionState }
           const selErr = checkSelector(p.groups, 'groups');
           if (selErr) return fail(selErr);
           actions.push({ id, type: a.type, on_error, params: { name, groups: p.groups } });
+        } else if (a.type === 'ai_agent') {
+          const name = String(p.name ?? '').trim();
+          if (!name) return fail(`${where}: informe o nome do agente`);
+          if (id) createIds.add(id);
+          const conhecimento = Array.isArray(p.knowledge) ? p.knowledge : [];
+          for (const [ki, k] of conhecimento.entries()) {
+            if (!String(k?.content ?? '').trim()) return fail(`${where}, conhecimento ${ki + 1}: conteúdo vazio`);
+          }
+          actions.push({
+            id, type: a.type, on_error,
+            params: {
+              name,
+              description: String(p.description ?? ''),
+              system_prompt: String(p.system_prompt ?? ''),
+              model: p.model || undefined,
+              keywords: Array.isArray(p.keywords) ? p.keywords.map(String) : [],
+              min_similarity: Number.isFinite(Number(p.min_similarity)) ? Number(p.min_similarity) : undefined,
+              use_in_triage: !!p.use_in_triage,
+              enabled: p.enabled !== false,
+              knowledge: conhecimento.map((k) => ({
+                title: String(k.title ?? ''),
+                content: String(k.content),
+              })),
+            },
+          });
+        } else if (a.type === 'ai_binding') {
+          const selErr = checkSelector(p.groups, 'groups');
+          if (selErr) return fail(selErr);
+          const mode = p.mode === 'triage' ? 'triage' : 'agent';
+          if (mode === 'agent' && !p.agent_ref) {
+            return fail(`${where}: modo "agent" exige agent_ref apontando para uma ação ai_agent do plano`);
+          }
+          if (p.agent_ref && !createIds.has(String(p.agent_ref))) {
+            return fail(`${where}: agent_ref "${p.agent_ref}" não é o id de uma ação ai_agent anterior`);
+          }
+          const trigger = ['mention', 'match', 'always'].includes(p.trigger_mode) ? p.trigger_mode : 'mention';
+          if (trigger === 'match' && !String(p.pattern ?? '').trim()) {
+            return fail(`${where}: gatilho "match" exige pattern`);
+          }
+          actions.push({
+            id, type: a.type, on_error,
+            params: {
+              groups: p.groups, mode, agent_ref: p.agent_ref ?? null, trigger_mode: trigger,
+              match_type: trigger === 'match' ? (p.match_type ?? 'contains') : undefined,
+              pattern: trigger === 'match' ? String(p.pattern) : undefined,
+              case_sensitive: !!p.case_sensitive,
+              max_hops: Number.isInteger(p.max_hops) ? p.max_hops : 2,
+              enabled: p.enabled !== false,
+            },
+          });
+        } else if (a.type === 'bulk_recurring') {
+          const selErr = checkSelector(p.groups, 'groups');
+          if (selErr) return fail(selErr);
+          if (!Number.isInteger(p.recur_dow) || p.recur_dow < 0 || p.recur_dow > 6) {
+            return fail(`${where}: recur_dow deve ser 0 (domingo) a 6 (sábado)`);
+          }
+          if (typeof p.recur_time !== 'string' || !/^\d{2}:\d{2}$/.test(p.recur_time)) {
+            return fail(`${where}: recur_time deve ser HH:MM`);
+          }
+          if (p.recur_week_parity != null && !['odd', 'even'].includes(p.recur_week_parity)) {
+            return fail(`${where}: recur_week_parity deve ser "odd", "even" ou ausente`);
+          }
+          const mudou = ['set_name', 'set_description', 'settings', 'image'].some((k) => p[k] != null);
+          if (!mudou) return fail(`${where}: informe ao menos uma alteração (set_name, set_description, settings ou image)`);
+          const params = {
+            groups: p.groups, name: p.name ?? undefined,
+            recur_dow: p.recur_dow, recur_time: p.recur_time,
+            recur_week_parity: p.recur_week_parity ?? undefined,
+            pace: p.pace ?? 'normal', enabled: p.enabled !== false,
+          };
+          if (typeof p.set_name === 'string') params.set_name = p.set_name;
+          if (typeof p.set_description === 'string') params.set_description = p.set_description;
+          if (p.settings) params.settings = p.settings;
+          if (p.image) params.image = await stageMedia(p.image, ['image'], `${where}, imagem`);
+          actions.push({ id, type: a.type, on_error, params });
+        } else if (a.type === 'account_settings') {
+          const label = String(p.label ?? '').trim();
+          if (!label) return fail(`${where}: informe o rótulo do chip`);
+          actions.push({
+            id, type: a.type, on_error,
+            params: { label, proxy_url: p.proxy_url ?? null, proxy_enabled: !!p.proxy_enabled },
+          });
         }
       } catch (e) {
         return fail(e?.message ?? `${where}: erro de validação`);
@@ -960,6 +1153,10 @@ export function createPlans(db, wa, bulk, { mediaDir, appVersion, editionState }
         totals.rules += 1;
         for (const ra of p.actions) if (ra.type === 'webhook') webhooks.push(ra.url);
       } else if (a.type === 'save_selection') totals.selections += 1;
+      else if (a.type === 'ai_agent') totals.agents = (totals.agents ?? 0) + 1;
+      else if (a.type === 'ai_binding') totals.bindings = (totals.bindings ?? 0) + 1;
+      else if (a.type === 'bulk_recurring') totals.bulk_recurring = (totals.bulk_recurring ?? 0) + 1;
+      else if (a.type === 'account_settings') totals.chips = (totals.chips ?? 0) + 1;
 
       return {
         order_index: idx,
@@ -1056,6 +1253,27 @@ export function createPlans(db, wa, bulk, { mediaDir, appVersion, editionState }
         return `Regra "${p.name}" — quando ${trg} em ${selDesc(p.scope)} → ${p.actions.map((x) => x.type).join(', ')}`;
       }
       case 'save_selection': return `Salvar seleção "${p.name}" com ${selDesc(p.groups)}`;
+      case 'ai_agent': {
+        const k = Array.isArray(p.knowledge) ? p.knowledge.length : 0;
+        return `Criar agente de IA "${p.name}"${p.use_in_triage ? ' (disponível para triagem)' : ''}` +
+               ` — ${k} bloco(s) de conhecimento`;
+      }
+      case 'ai_binding': {
+        const quem = p.mode === 'triage' ? 'Triagem' : `Agente de "${p.agent_ref}"`;
+        const gatilho = p.trigger_mode === 'always' ? 'toda mensagem'
+          : p.trigger_mode === 'match' ? `quando contiver "${p.pattern}"`
+          : 'quando mencionarem o chip';
+        return `${quem} responde em ${selDesc(p.groups)} — ${gatilho}`;
+      }
+      case 'bulk_recurring': {
+        const semana = p.recur_week_parity === 'odd' ? ' de semanas ímpares'
+          : p.recur_week_parity === 'even' ? ' de semanas pares' : '';
+        const muda = [p.set_name != null && 'nome', p.set_description != null && 'descrição',
+                      p.image && 'imagem', p.settings && 'configurações'].filter(Boolean).join(', ');
+        return `Editar ${selDesc(p.groups)} toda ${DOW[p.recur_dow]}${semana} às ${p.recur_time} — ${muda}`;
+      }
+      case 'account_settings':
+        return `Configurar chip "${p.label}"${p.proxy_enabled ? ' (com proxy)' : ''}`;
       default: return a.type;
     }
   }

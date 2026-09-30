@@ -225,8 +225,8 @@ function ChipCard({
 
       {s === "connected" && account.me && (
         <ul className="kv">
-          <li><span>Número</span><b className="mono">{account.me.jid.split("@")[0]}</b></li>
-          <li><span>Nome</span><b>{account.me.name ?? "—"}</b></li>
+          <li><span>Número</span><b className="mono" data-sensivel="telefone">{account.me.jid.split("@")[0]}</b></li>
+          <li><span>Nome</span><b data-sensivel="nome">{account.me.name ?? "—"}</b></li>
           <li><span>Grupos</span><b>{account.groups} ({account.admin_groups} admin)</b></li>
         </ul>
       )}
@@ -252,7 +252,7 @@ function ChipCard({
         </p>
       )}
       {account.proxy_enabled && account.proxy_url && (
-        <p className="hint">via proxy {account.proxy_url.replace(/\/\/.*@/, "//")}</p>
+        <p className="hint" data-sensivel="credencial">via proxy {account.proxy_url.replace(/\/\/.*@/, "//")}</p>
       )}
 
       <div className="gate-actions" style={{ justifyContent: "flex-start" }}>

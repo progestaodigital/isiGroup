@@ -956,3 +956,29 @@ export const deleteAiBinding = (id: number) =>
   sidecar<{ ok?: boolean }>(`/ai/bindings/${id}`, { method: "DELETE" });
 
 export const listAiEvents = (limit = 50) => sidecar<{ events: AiEvent[] }>(`/ai/events?limit=${limit}`);
+
+// --- Exportação da configuração (gera um isiplan importável) ---
+
+export type ExportSection = "schedules" | "automations" | "agents" | "bulk" | "selections" | "accounts";
+
+export interface ExportSummary {
+  sections: Record<string, number>;
+  available: ExportSection[];
+}
+
+export interface ExportResult {
+  path: string;
+  dir: string;
+  filename: string;
+  bytes: number;
+  warnings: string[];
+  counts: Record<string, number>;
+  actions: number;
+  media_files: number;
+  error?: string;
+  message?: string;
+}
+
+export const getExportSummary = () => sidecar<ExportSummary>("/export/summary");
+export const runExport = (b: { sections: ExportSection[]; include_secrets: boolean; name?: string }) =>
+  sidecar<ExportResult>("/export", { method: "POST", ...jbody(b) });

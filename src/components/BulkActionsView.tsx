@@ -1041,7 +1041,7 @@ function JobRow({
                   <span className={`dot ${it.status === "ok" ? "on" : it.status === "failed" ? "err" : it.status === "skipped" ? "warn" : "off"}`} />
                   <span className="bulk-item-main">
                     {it.group_name ?? it.group_jid.split("@")[0]}
-                    {it.contact ? <span className="muted"> · {it.contact}</span> : null}
+                    {it.contact ? <span className="muted" data-sensivel="telefone"> · {it.contact}</span> : null}
                   </span>
                   <span className="muted small">{it.detail ?? it.status}</span>
                 </div>

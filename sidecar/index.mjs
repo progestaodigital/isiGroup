@@ -19,6 +19,9 @@ import { weekAllows, parityToCols, colsToParity } from './src/weeks.mjs';
 import { createAi } from './src/ai/agents.mjs';
 import { setUploadsDir } from './src/ai/net-guard.mjs';
 import { createResponder } from './src/ai/responder.mjs';
+import { createExporter, SECOES } from './src/exporter.mjs';
+import { zipSync } from 'fflate';
+import { homedir } from 'node:os';
 
 // Nome/versão vêm do package.json (copiado ao lado deste módulo no bundle),
 // para o /health nunca defasar em relação à versão real publicada.
@@ -51,6 +54,10 @@ const mediaDir = join(dataDir, 'media');
 // aceita ler. Ver net-guard.mjs — caminho arbitrario do cliente viraria
 // leitura de qualquer arquivo do disco, exfiltrada pelas respostas do agente.
 const aiUploadsDir = join(dataDir, 'ai-uploads');
+// Exportacoes vao para a pasta Downloads (onde o usuario procura), com
+// fallback para os dados do app se ela nao existir.
+const downloads = join(homedir(), 'Downloads');
+const exportDir = existsSync(downloads) ? join(downloads, 'isigroup') : join(dataDir, 'exports');
 const wa = createWhatsApp(db, sessionDir);
 
 // Worker do agendador: re-hidrata a fila e dispara no horario.
@@ -68,6 +75,7 @@ wa.setMembershipHandler(automation.onMembership);
 // Acoes em massa (bulk): fila propria no SQLite, retomada no arranque.
 const bulk = createBulk(db, wa);
 const ai = createAi(db);
+const exporter = createExporter(db);
 setUploadsDir(aiUploadsDir);
 
 // Agentes de IA: respondem no grupo em paralelo as automacoes. Ha UM handler
@@ -550,6 +558,57 @@ async function route(req, res, url) {
     if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
     if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
     return json(res, 200, { ok: true });
+  }
+
+  // --- Exportacao da configuracao (gera um isiplan importavel) ---
+  if (match('GET', '/export/summary')) {
+    return json(res, 200, { sections: exporter.resumo(), available: SECOES });
+  }
+  if (match('POST', '/export')) {
+    const b = await readJson(req);
+    const secoes = Array.isArray(b?.sections) && b.sections.length ? b.sections : SECOES;
+    const { plan, midias, avisos, contagem } = exporter.build({
+      secoes,
+      comSegredos: !!b?.include_secrets,
+      nome: b?.name,
+    });
+    if (plan.actions.length === 0) {
+      return json(res, 400, { error: 'bad_request', message: 'nada a exportar nas secoes escolhidas' });
+    }
+
+    const planJson = JSON.stringify(plan, null, 2);
+    const dia = new Date().toISOString().slice(0, 10);
+    // Com midia o formato canonico e o pacote .isiplan (zip com plan.json +
+    // media/). Sem midia, um .json solto — mais facil de inspecionar e editar.
+    const comMidia = midias.size > 0;
+    const filename = `isigroup-config-${dia}.${comMidia ? 'isiplan' : 'json'}`;
+
+    let bytes;
+    if (comMidia) {
+      const arq = { 'plan.json': new Uint8Array(Buffer.from(planJson, 'utf8')) };
+      for (const [nome, buf] of midias) arq[`media/${nome}`] = new Uint8Array(buf);
+      bytes = Buffer.from(zipSync(arq, { level: 6 }));
+    } else {
+      bytes = Buffer.from(planJson, 'utf8');
+    }
+
+    // Grava em disco em vez de devolver base64: o app nao tem plugin de
+    // dialogo de arquivo, e um pacote com video passaria de dezenas de MB
+    // trafegando dentro de um JSON.
+    mkdirSync(exportDir, { recursive: true });
+    const destino = join(exportDir, filename);
+    writeFileSync(destino, bytes);
+
+    return json(res, 200, {
+      path: destino,
+      dir: exportDir,
+      filename,
+      bytes: bytes.length,
+      warnings: avisos,
+      counts: contagem,
+      actions: plan.actions.length,
+      media_files: midias.size,
+    });
   }
 
   // --- Planos de acao (isiplan) ---

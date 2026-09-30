@@ -138,7 +138,7 @@ export function AutomationView({ isPro }: { isPro: boolean }) {
               <div>
                 <b>{l.rule_name ?? "(regra removida)"}</b>
                 <div className="muted small">
-                  {nameByJid[l.target_jid] ?? l.target_jid.split("@")[0]} · {l.sender_e164 ?? "—"}
+                  <span data-sensivel="grupo">{nameByJid[l.target_jid] ?? l.target_jid.split("@")[0]}</span> · <span data-sensivel="telefone">{l.sender_e164 ?? "—"}</span>
                   {l.matched_text ? ` · "${l.matched_text.slice(0, 60)}"` : ""}
                 </div>
               </div>

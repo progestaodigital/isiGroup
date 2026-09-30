@@ -745,3 +745,27 @@ input[type="range"]::-webkit-slider-thumb {
   border: none;
 }
 input[type="range"]:focus { box-shadow: 0 0 0 3px rgba(204, 255, 0, 0.13); }
+
+/* --- Modo privacidade (embaça dados sensíveis) ---
+   Proteção visual para gravar tela / tirar print. O dado continua no app;
+   passar o mouse revela, para o usuário conseguir conferir sem desligar tudo. */
+.privacidade [data-sensivel] {
+  filter: blur(5px);
+  transition: filter 120ms ease;
+  cursor: help;
+  /* Impede seleção acidental do texto borrado ao arrastar numa gravação. */
+  user-select: none;
+}
+.privacidade [data-sensivel]:hover,
+.privacidade [data-sensivel]:focus-within {
+  filter: none;
+  user-select: auto;
+}
+/* Campo de texto borrado: mantém a legibilidade da própria digitação ao focar. */
+.privacidade input[data-sensivel]:focus,
+.privacidade textarea[data-sensivel]:focus {
+  filter: none;
+}
+
+.privacy-toggle { display: flex; align-items: center; gap: 10px; }
+.privacy-toggle .hint { margin: 0; }

@@ -533,7 +533,7 @@ function ScheduleForm({
           <span>Mensagem por grupo</span>
           {selectedTargets.map((t) => (
             <div key={t.id} className="per-target">
-              <b className="small">{t.name}</b>
+              <b className="small" data-sensivel="grupo">{t.name}</b>
               <textarea rows={2} value={perText[t.id] ?? ""} onChange={(e) => { const v = e.currentTarget.value; setPerText((p) => ({ ...p, [t.id]: v })); }} placeholder="Mensagem específica" />
             </div>
           ))}

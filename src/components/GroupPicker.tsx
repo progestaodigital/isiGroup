@@ -128,7 +128,7 @@ export function GroupPicker({
             <label key={t.id} className="pick">
               <input type="checkbox" checked={selected.has(t.id)} onChange={() => toggle(t.id)} />
               <span>
-                {t.name}
+                <span data-sensivel="grupo">{t.name}</span>
                 {showMemberTag && !t.is_admin && <span className="muted small"> (membro)</span>}
               </span>
             </label>
@@ -180,7 +180,7 @@ export function GroupPicker({
                       onClick={() => apply(s)}
                       title={`Aplicar seleção (${s.jids.length} grupos)`}
                     >
-                      {s.name} <span className="muted">({s.jids.length})</span>
+                      <span data-sensivel="grupo">{s.name}</span> <span className="muted">({s.jids.length})</span>
                     </button>
                     <button
                       type="button"

@@ -17,7 +17,16 @@ export function createAi(db) {
 
   // --- Chave ---
 
-  const applyKey = (key) => ({ ok: setKey(key), masked: maskKey() });
+  function applyKey(key) {
+    const ok = setKey(key);
+    // Chave chegou: indexa o que entrou sem ela (importacao de plano, por ex.).
+    if (ok) {
+      const pend = db.prepare("SELECT id FROM ai_documents WHERE status = 'pending'").all();
+      for (const d of pend) runIndex(d.id);
+      if (pend.length) console.error(`[ai] chave configurada — indexando ${pend.length} documento(s) pendente(s)`);
+    }
+    return { ok, masked: maskKey(), indexing_pending: ok ? db.prepare("SELECT COUNT(*) n FROM ai_documents WHERE status = 'pending'").get().n : 0 };
+  }
 
   const status = () => ({
     has_key: hasKey(),
@@ -141,7 +150,6 @@ export function createAi(db) {
   // source: text (content) | url (source_ref) | file (source_ref = caminho)
   async function addDocument(agentId, body) {
     if (!db.prepare('SELECT id FROM ai_agents WHERE id = ?').get(agentId)) return { error: 'not_found' };
-    if (!hasKey()) return { error: 'configure a chave da OpenAI antes de subir conhecimento' };
     if (db.prepare('SELECT COUNT(*) n FROM ai_documents WHERE agent_id = ?').get(agentId).n >= MAX_DOCS_PER_AGENT) {
       return { error: `limite de ${MAX_DOCS_PER_AGENT} documentos por agente atingido` };
     }
@@ -170,17 +178,22 @@ export function createAi(db) {
     if (!content.trim()) return { error: 'nao foi possivel extrair texto desta fonte' };
     if (!title) title = content.trim().slice(0, 60);
 
+    // Sem chave, o documento entra como 'pending' em vez de ser recusado: o
+    // TEXTO e o que importa (o vetor e derivavel) e descarta-lo perderia
+    // conhecimento na importacao de um plano numa maquina ainda sem chave.
+    // Assim que a chave chega, tudo que esta pendente e indexado.
+    const pronto = hasKey();
     const now = new Date().toISOString();
     const r = db
       .prepare(
         `INSERT INTO ai_documents (agent_id, title, source, source_ref, content, status, created_at)
-         VALUES (?,?,?,?,?,'indexing',?)`
+         VALUES (?,?,?,?,?,?,?)`
       )
-      .run(agentId, title, source, ref || null, content, now);
+      .run(agentId, title, source, ref || null, content, pronto ? 'indexing' : 'pending', now);
 
     const id = Number(r.lastInsertRowid);
-    runIndex(id);
-    return { id, chars: content.length };
+    if (pronto) runIndex(id);
+    return { id, chars: content.length, pending: !pronto };
   }
 
   // Indexa em segundo plano; o status do documento e o canal de resultado.
@@ -204,7 +217,7 @@ export function createAi(db) {
 
   function reindexDocument(id) {
     if (!db.prepare('SELECT id FROM ai_documents WHERE id = ?').get(id)) return { error: 'not_found' };
-    if (!hasKey()) return { error: 'configure a chave da OpenAI' };
+    if (!hasKey()) return { error: 'configure a chave da OpenAI para indexar' };
     if (indexing.has(id)) return { error: 'este documento ja esta sendo indexado' };
     db.prepare("UPDATE ai_documents SET status = 'indexing', error_msg = NULL WHERE id = ?").run(id);
     runIndex(id);

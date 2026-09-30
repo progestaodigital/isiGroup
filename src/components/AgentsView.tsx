@@ -45,7 +45,7 @@ const MODELOS = [
 ];
 
 const DOC_STATUS: Record<string, { label: string; cls: string }> = {
-  pending: { label: "Aguardando", cls: "off" },
+  pending: { label: "Aguarda a chave", cls: "warn" },
   indexing: { label: "Indexando…", cls: "warn" },
   ready: { label: "Pronto", cls: "ok" },
   error: { label: "Erro", cls: "err" },
@@ -766,7 +766,7 @@ function BindingsPanel({
               <div key={b.id} className="row-item col">
                 <div className="row-main">
                   <div>
-                    <b>{b.group_name || b.target_jid}</b>
+                    <b data-sensivel="grupo">{b.group_name || b.target_jid}</b>
                     <div className="muted small">{descreve(b)}</div>
                     {b.mode === "triage" && (
                       <div className="muted small">Tenta até {b.max_hops + 1} agente(s) antes de desistir</div>

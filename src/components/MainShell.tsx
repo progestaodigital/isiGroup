@@ -16,6 +16,8 @@ import { SchedulerView } from "./SchedulerView";
 import { AutomationView } from "./AutomationView";
 import { BulkActionsView } from "./BulkActionsView";
 import { AgentsView } from "./AgentsView";
+import { ExportView } from "./ExportView";
+import { aplicar, lerPreferencia, salvarPreferencia } from "../lib/privacy";
 import { PlansView } from "./PlansView";
 import { FaqView } from "./FaqView";
 
@@ -24,7 +26,7 @@ interface Props {
   onLicenseChange: (s: LicenseState) => void;
 }
 
-type View = "overview" | "connection" | "targets" | "scheduler" | "automation" | "bulk" | "agents" | "plans" | "faq" | "support";
+type View = "overview" | "connection" | "targets" | "scheduler" | "automation" | "bulk" | "agents" | "plans" | "export" | "faq" | "support";
 
 const FUTURE: { fase: number; nome: string }[] = [];
 
@@ -34,6 +36,14 @@ const SUPPORT_URL = "https://www.isiflow.com.br/chat/b5cd3e5f2b3ec0c488f6045d594
 export function MainShell({ license, onLicenseChange }: Props) {
   const [view, setView] = useState<View>("overview");
   const isPro = license.edition === "pro";
+  // Modo privacidade: a preferência é lida uma vez e aplicada como classe na
+  // raiz do documento, então vale para todas as telas sem prop drilling.
+  const [privacidade, setPrivacidade] = useState(lerPreferencia);
+
+  useEffect(() => {
+    aplicar(privacidade);
+    salvarPreferencia(privacidade);
+  }, [privacidade]);
 
   // Propaga a edição validada para o sidecar (gate de recursos Pro no motor).
   useEffect(() => {
@@ -94,6 +104,12 @@ export function MainShell({ license, onLicenseChange }: Props) {
             Planos &amp; IA
           </button>
           <button
+            className={`nav-item ${view === "export" ? "active" : ""}`}
+            onClick={() => setView("export")}
+          >
+            Exportar
+          </button>
+          <button
             className={`nav-item ${view === "faq" ? "active" : ""}`}
             onClick={() => setView("faq")}
           >
@@ -122,7 +138,9 @@ export function MainShell({ license, onLicenseChange }: Props) {
 
       <main className="content">
         <ApprovalsBar />
-        {view === "overview" && <Overview license={license} onGo={setView} />}
+        {view === "overview" && (
+          <Overview license={license} onGo={setView} privacidade={privacidade} setPrivacidade={setPrivacidade} />
+        )}
         {view === "connection" && (
           <ConnectionsView isPro={isPro} onConnected={() => setView("targets")} />
         )}
@@ -132,6 +150,7 @@ export function MainShell({ license, onLicenseChange }: Props) {
         {view === "bulk" && <BulkActionsView />}
         {view === "agents" && <AgentsView isPro={isPro} />}
         {view === "plans" && <PlansView />}
+        {view === "export" && <ExportView />}
         {view === "faq" && <FaqView isPro={isPro} />}
         {view === "support" && <SupportView />}
       </main>
@@ -211,9 +230,13 @@ function SupportView() {
 function Overview({
   license,
   onGo,
+  privacidade,
+  setPrivacidade,
 }: {
   license: LicenseState;
   onGo: (v: View) => void;
+  privacidade: boolean;
+  setPrivacidade: (v: boolean) => void;
 }) {
   return (
     <div>
@@ -221,6 +244,25 @@ function Overview({
       <p className="muted">Fundação operacional. Conecte um número para começar.</p>
 
       <UpdateBanner />
+
+      <div className="card">
+        <label className="check privacy-toggle">
+          <input
+            type="checkbox"
+            checked={privacidade}
+            onChange={(e) => setPrivacidade(e.currentTarget.checked)}
+          />
+          <span>
+            <b>Modo privacidade</b> — embaça dados sensíveis na tela
+          </span>
+        </label>
+        <p className="hint">
+          Para gravar vídeo, tirar print ou compartilhar a tela sem expor telefones e nomes de leads,
+          nomes de grupos, seu próprio número, chaves e conteúdo de mensagens.
+          Passe o mouse sobre um campo para revelá-lo sem desligar o modo.
+          É proteção <b>visual</b>: o dado continua no app, apenas não aparece.
+        </p>
+      </div>
 
       <div className="grid">
         <section className="card status">

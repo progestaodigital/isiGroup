@@ -1,28 +1,22 @@
-## isiGroup v0.3.0
+## isiGroup v0.4.0
 
-### Correção: webhooks agora enviam a chave nos cabeçalhos padrão
-Integrações com isiFlow, n8n, Make, Zapier e endpoints próprios estavam **falhando com "chave inválida" mesmo com a chave certa configurada dos dois lados**.
+### Exportar toda a sua configuração — e restaurar em outro computador
+Nova aba **Exportar**. Gera um arquivo com tudo que você configurou, e você escolhe o que entra.
 
-- O app só enviava uma *assinatura* derivada da chave, num cabeçalho próprio que nenhuma ferramenta do mercado conhece — a chave em si nunca chegava ao destino.
-- Agora toda entrega leva a chave, exatamente como você a cadastrou, em **`x-api-key`** e em **`Authorization: Bearer`**, que é onde essas ferramentas procuram.
-- A assinatura continua sendo enviada, para quem já validava por ela — nada quebra de quem estava funcionando.
-- Vale para **todos** os gatilhos (entrou, saiu, mensagem, link), e a chave vai junto também nas tentativas de reenvio.
+- Marque as seções que quiser: **agendamentos**, **automações e gatilhos**, **agentes de IA**, **edições de grupo recorrentes**, **seleções de grupos salvas** e **configuração dos chips**.
+- O arquivo preserva **tudo**: dia da semana, horário, semana par ou ímpar, o texto de cada mensagem da sequência, o intervalo entre elas, enquetes, imagens e áudios, o conhecimento dos agentes, a triagem e os grupos onde cada coisa vale.
+- Para restaurar, importe em **Planos & IA → Importar plano** — no mesmo computador ou em outro. O arquivo exportado é um plano comum, então você vê a prévia completa e confirma antes de qualquer coisa ser criada.
+- Os grupos são encontrados **pelo nome**. Isso permite levar sua configuração para outra máquina com outros grupos, desde que os nomes sejam os mesmos. Se você tiver dois grupos com o mesmo nome, o app avisa na hora de exportar.
+- **Segredos dos webhooks**: você decide. Deixe desmarcado para compartilhar o arquivo com segurança; marque para fazer backup seu, com tudo pronto para voltar a funcionar.
+- Sai só configuração — histórico de disparos, logs e perguntas feitas aos agentes não entram. E nunca saem: a sessão do WhatsApp, a chave da licença e a chave da OpenAI.
 
-### Correção: o app não desiste mais de reconectar
-Se o computador hibernava, suspendia, trocava de Wi-Fi ou a internet caía por mais de um minuto, **o chip ficava desconectado para sempre** — e sem chip conectado, nenhuma automação disparava até alguém perceber e reconectar na mão.
+### Modo privacidade: embaça dados sensíveis na tela
+Novo interruptor na **Visão geral**, para gravar vídeo, tirar print ou compartilhar a tela sem expor dados de ninguém.
 
-- O app tentava reconectar por 60 segundos e então parava de vez. Ao voltar da hibernação, o Windows costuma levar mais que isso para restaurar a rede — então ele desistia pouco antes de a internet voltar.
-- Agora, depois das tentativas rápidas, ele passa a **tentar de minuto em minuto, sem desistir**. Assim que a rede volta, o chip religa sozinho.
-- A tela de Conexão mostra a diferença: **amarelo** quando é queda passageira e o app está se resolvendo sozinho, **vermelho** quando parou e depende de você (por exemplo, aparelho desvinculado, que exige QR novo).
+- Embaça telefones e nomes de leads, nomes de grupos, **o seu próprio número**, credenciais e a URL do proxy.
+- Passe o mouse sobre qualquer campo para revelá-lo, sem precisar desligar o modo.
+- A escolha fica guardada entre um uso e outro.
+- É proteção **visual**: o dado continua no app normalmente, apenas não aparece na tela.
 
-### Novo: Agentes de IA com base de conhecimento
-Nova aba **Agentes de IA** (Pro). Agentes respondem perguntas dentro do grupo usando **apenas** o conteúdo que você cadastrar — não inventam.
-
-- Você usa a **sua** chave da OpenAI; o consumo é cobrado direto na sua conta. A chave fica no cofre do Windows, nunca em arquivo nem no banco do app.
-- Cadastre o conhecimento colando texto, enviando **.txt, .md, .pdf ou .docx**, ou apontando uma página da web.
-- **Triagem**: quando há vários agentes, ela lê a pergunta e escolhe o mais indicado. Se ele não souber, tenta o próximo — você decide quantas tentativas.
-- Escolha **quando** o agente responde: ao mencionarem o chip, por uma palavra-chave que você define, ou em toda mensagem.
-- Se nenhum agente souber, o app **fica calado** em vez de arriscar uma resposta errada — e registra a pergunta para você melhorar a base.
-- Um painel de testes mostra o que o agente encontraria antes de você soltá-lo num grupo, e há limite automático de respostas por hora para a conta não disparar.
-
-Nada disso liga sozinho: exige chave, agente, conhecimento e vínculo com o grupo — quatro passos deliberados.
+### Conhecimento dos agentes não se perde mais
+Ao cadastrar conhecimento sem ter a chave da OpenAI configurada, o texto era recusado e perdido. Agora ele fica guardado como **"aguarda a chave"** e é processado automaticamente assim que você cadastrar a chave.

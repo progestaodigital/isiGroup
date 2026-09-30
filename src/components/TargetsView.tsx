@@ -73,7 +73,7 @@ export function TargetsView() {
           {shown.map((t) => (
             <div key={t.id} className="row-item">
               <div>
-                <b>{t.name}</b>
+                <b data-sensivel="grupo">{t.name}</b>
                 <span className="mono small muted"> {t.jid.split("@")[0]}</span>
               </div>
               <div className="tags">
