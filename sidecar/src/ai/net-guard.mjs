@@ -39,27 +39,70 @@ const inV4Range = (octets, [base, bits]) => {
   return (toInt(octets) & mask) === (toInt(base) & mask);
 };
 
+// Expande um IPv6 para os 8 grupos numericos. Resolve "::", zona (%eth0) e a
+// forma com IPv4 embutido. Devolve null se nao for IPv6 valido.
+//
+// Existe porque casar TEXTO de IPv6 nao funciona: o mesmo endereco tem varias
+// grafias. O parser de URL do Node, por exemplo, reescreve
+// [::ffff:127.0.0.1] como [::ffff:7f00:1] — hexadecimal. Uma guarda que so
+// procurasse "::ffff:" seguido de pontos deixaria loopback passar.
+function expandIPv6(addr) {
+  let a = addr.split('%')[0];
+
+  // IPv4 embutido no fim (::ffff:1.2.3.4) -> converte para 2 grupos hex.
+  const emb = /^(.*:)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(a);
+  if (emb) {
+    const o = emb[2].split('.').map(Number);
+    if (o.some((x) => x > 255)) return null;
+    a = `${emb[1]}${(((o[0] << 8) | o[1]) >>> 0).toString(16)}:${(((o[2] << 8) | o[3]) >>> 0).toString(16)}`;
+  }
+
+  const lados = a.split('::');
+  if (lados.length > 2) return null;
+  const head = lados[0] ? lados[0].split(':') : [];
+  const rear = lados.length === 2 ? (lados[1] ? lados[1].split(':') : []) : [];
+  const preenche = 8 - head.length - rear.length;
+  if (lados.length === 1 ? head.length !== 8 : preenche < 0) return null;
+
+  const grupos = [...head, ...Array(lados.length === 2 ? preenche : 0).fill('0'), ...rear];
+  if (grupos.length !== 8) return null;
+  const nums = grupos.map((g) => (g === '' ? 0 : parseInt(g, 16)));
+  return nums.some((n) => Number.isNaN(n) || n < 0 || n > 0xffff) ? null : nums;
+}
+
 export function isBlockedIp(ip) {
   if (!ip) return true;
-  let addr = String(ip).toLowerCase().trim();
+  // Colchetes (do parser de URL) e zona saem antes de qualquer analise.
+  const addr = String(ip).toLowerCase().trim().replace(/^\[|\]$/g, '').split('%')[0];
 
-  // IPv6 com escopo (fe80::1%eth0) e colchetes.
-  addr = addr.replace(/^\[|\]$/g, '').split('%')[0];
-
-  // IPv4 puro ou IPv4 mapeado em IPv6 (::ffff:127.0.0.1) — valem as regras v4.
-  const v4 = addr.startsWith('::ffff:') ? addr.slice(7) : addr;
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(v4);
+  // IPv4 em notacao pontilhada.
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(addr);
   if (m) {
     const oct = m.slice(1).map(Number);
     if (oct.some((o) => o > 255)) return true;
     return v4Blocked.some((r) => inV4Range(oct, r));
   }
 
-  // IPv6
-  if (addr === '::1' || addr === '::') return true;          // loopback / nao especificado
-  if (/^f[cd][0-9a-f]{2}:/.test(addr)) return true;          // fc00::/7 unique-local
-  if (/^fe[89ab][0-9a-f]:/.test(addr)) return true;          // fe80::/10 link-local
-  if (/^ff[0-9a-f]{2}:/.test(addr)) return true;             // multicast
+  const g = expandIPv6(addr);
+  if (!g) return true; // nao entendi o formato -> recusa (falha fechada)
+
+  const zerosAte = (n) => g.slice(0, n).every((x) => x === 0);
+
+  // IPv4 mapeado (::ffff:a.b.c.d) e IPv4-compativel (::a.b.c.d): valem as
+  // regras de IPv4 sobre os 32 bits finais. E por aqui que loopback se
+  // disfarcava de IPv6.
+  const ehMapeado = zerosAte(5) && g[5] === 0xffff;
+  const ehCompativel = zerosAte(6) && (g[6] !== 0 || g[7] !== 0);
+  if (ehMapeado || ehCompativel) {
+    const oct = [g[6] >> 8, g[6] & 0xff, g[7] >> 8, g[7] & 0xff];
+    return v4Blocked.some((r) => inV4Range(oct, r));
+  }
+
+  if (g.every((x) => x === 0)) return true;              // ::   nao especificado
+  if (zerosAte(7) && g[7] === 1) return true;            // ::1  loopback
+  if ((g[0] & 0xfe00) === 0xfc00) return true;           // fc00::/7  unique-local
+  if ((g[0] & 0xffc0) === 0xfe80) return true;           // fe80::/10 link-local
+  if ((g[0] & 0xff00) === 0xff00) return true;           // ff00::/8  multicast
   return false;
 }
 
