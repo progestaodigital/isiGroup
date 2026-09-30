@@ -15,6 +15,7 @@ import { TargetsView } from "./TargetsView";
 import { SchedulerView } from "./SchedulerView";
 import { AutomationView } from "./AutomationView";
 import { BulkActionsView } from "./BulkActionsView";
+import { AgentsView } from "./AgentsView";
 import { PlansView } from "./PlansView";
 import { FaqView } from "./FaqView";
 
@@ -23,7 +24,7 @@ interface Props {
   onLicenseChange: (s: LicenseState) => void;
 }
 
-type View = "overview" | "connection" | "targets" | "scheduler" | "automation" | "bulk" | "plans" | "faq" | "support";
+type View = "overview" | "connection" | "targets" | "scheduler" | "automation" | "bulk" | "agents" | "plans" | "faq" | "support";
 
 const FUTURE: { fase: number; nome: string }[] = [];
 
@@ -81,6 +82,12 @@ export function MainShell({ license, onLicenseChange }: Props) {
             Ações em massa
           </button>
           <button
+            className={`nav-item ${view === "agents" ? "active" : ""}`}
+            onClick={() => setView("agents")}
+          >
+            Agentes de IA
+          </button>
+          <button
             className={`nav-item ${view === "plans" ? "active" : ""}`}
             onClick={() => setView("plans")}
           >
@@ -123,6 +130,7 @@ export function MainShell({ license, onLicenseChange }: Props) {
         {view === "scheduler" && <SchedulerView isPro={isPro} />}
         {view === "automation" && <AutomationView isPro={isPro} />}
         {view === "bulk" && <BulkActionsView />}
+        {view === "agents" && <AgentsView isPro={isPro} />}
         {view === "plans" && <PlansView />}
         {view === "faq" && <FaqView isPro={isPro} />}
         {view === "support" && <SupportView />}

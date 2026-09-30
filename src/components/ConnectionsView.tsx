@@ -241,7 +241,15 @@ function ChipCard({
       )}
       {s === "connecting" && <p className="muted">Estabelecendo conexão…</p>}
       {s === "disconnected" && account.last_error && (
-        <p className="small" style={{ color: "#e05a4f", marginTop: 4 }}>⚠ {account.last_error}</p>
+        // Amarelo quando o app ainda esta tentando sozinho (queda transitoria:
+        // hibernacao, Wi-Fi, internet caiu); vermelho quando parou de vez e
+        // depende de acao sua.
+        <p
+          className="small"
+          style={{ color: account.retrying ? "#d8a200" : "#e05a4f", marginTop: 4 }}
+        >
+          {account.retrying ? "↻" : "⚠"} {account.last_error}
+        </p>
       )}
       {account.proxy_enabled && account.proxy_url && (
         <p className="hint">via proxy {account.proxy_url.replace(/\/\/.*@/, "//")}</p>

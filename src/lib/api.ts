@@ -172,6 +172,8 @@ export interface Account {
   qr: string | null;
   me: { jid: string; lid?: string | null; name: string | null } | null;
   last_error: string | null;
+  // true = desconectado, mas o app continua tentando religar sozinho (1x/min).
+  retrying?: boolean;
   groups: number;
   admin_groups: number;
 }
@@ -786,3 +788,171 @@ export interface IntegrationLogRow {
 }
 
 export const getIntegrationLog = () => sidecar<{ log: IntegrationLogRow[] }>("/integration/log");
+
+// --- Agentes de IA (RAG + triagem) ---
+// A chave da OpenAI vive no keyring do SO (comandos Tauri abaixo). O front a
+// lê e injeta no sidecar a cada arranque; ela nunca é gravada em banco.
+
+export const setOpenAiKey = (key: string) => invoke<string>("set_openai_key", { key });
+export const getOpenAiKey = () => invoke<string | null>("get_openai_key");
+export const getOpenAiKeyMasked = () => invoke<string | null>("get_openai_key_masked");
+export const clearOpenAiKey = () => invoke<void>("clear_openai_key");
+
+export interface AiAgent {
+  id: number;
+  name: string;
+  description: string;
+  system_prompt: string;
+  model: string;
+  keywords: string[];
+  min_similarity: number;
+  use_in_triage: boolean;
+  enabled: boolean;
+  doc_count?: number;
+  chunk_count?: number;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export interface NewAiAgent {
+  name: string;
+  description?: string;
+  system_prompt?: string;
+  model?: string;
+  keywords?: string[];
+  min_similarity?: number;
+  use_in_triage?: boolean;
+  enabled?: boolean;
+}
+
+export type AiDocStatus = "pending" | "indexing" | "ready" | "error";
+
+export interface AiDocument {
+  id: number;
+  agent_id: number;
+  title: string;
+  source: "text" | "file" | "url";
+  source_ref: string | null;
+  status: AiDocStatus;
+  error_msg: string | null;
+  chunk_count: number;
+  content_len: number;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export type AiTriggerMode = "mention" | "match" | "always";
+
+export interface AiBinding {
+  id: number;
+  target_jid: string;
+  group_name: string | null;
+  mode: "agent" | "triage";
+  agent_id: number | null;
+  agent_name: string | null;
+  trigger_mode: AiTriggerMode;
+  match_type: MatchType | null;
+  pattern: string | null;
+  case_sensitive: boolean;
+  max_hops: number;
+  enabled: boolean;
+  created_at: string;
+}
+
+export interface NewAiBinding {
+  target_jid: string;
+  mode: "agent" | "triage";
+  agent_id?: number;
+  trigger_mode: AiTriggerMode;
+  match_type?: MatchType;
+  pattern?: string;
+  case_sensitive?: boolean;
+  max_hops?: number;
+  enabled?: boolean;
+}
+
+export interface AiEvent {
+  id: number;
+  target_jid: string | null;
+  chosen_agent_id: number | null;
+  question: string | null;
+  route: string | null;
+  tried: Array<{ agent_id: number; name: string; reason: string | null; score: number }>;
+  hops: number;
+  answered: boolean;
+  top_similarity: number | null;
+  error: string | null;
+  created_at: string;
+}
+
+export interface AiStatus {
+  has_key: boolean;
+  masked: string | null;
+  agents: number;
+  documents: number;
+  chunks: number;
+  indexing: number;
+}
+
+// Injeta a chave no sidecar (memória). Chamado no arranque e ao salvar.
+export const pushOpenAiKey = (key: string) =>
+  sidecar<{ ok: boolean; masked: string | null }>("/ai/key", { method: "POST", ...jbody({ key }) });
+export const validateOpenAiKey = () =>
+  sidecar<{ ok: boolean; message?: string }>("/ai/key/validate", { method: "POST" });
+export const getAiStatus = () => sidecar<AiStatus>("/ai/status");
+
+export const listAiAgents = () => sidecar<{ agents: AiAgent[] }>("/ai/agents");
+export const getAiAgent = (id: number) => sidecar<{ agent: AiAgent }>(`/ai/agents/${id}`);
+export const createAiAgent = (b: NewAiAgent) =>
+  sidecar<{ id?: number; error?: string; message?: string }>("/ai/agents", { method: "POST", ...jbody(b) });
+export const updateAiAgent = (id: number, b: NewAiAgent) =>
+  sidecar<{ ok?: boolean; error?: string; message?: string }>(`/ai/agents/${id}`, { method: "PUT", ...jbody(b) });
+export const deleteAiAgent = (id: number) =>
+  sidecar<{ ok?: boolean }>(`/ai/agents/${id}`, { method: "DELETE" });
+
+export const listAiDocuments = (agentId: number) =>
+  sidecar<{ documents: AiDocument[] }>(`/ai/agents/${agentId}/documents`);
+export const addAiDocument = (
+  agentId: number,
+  b: { source: "text" | "file" | "url"; title?: string; content?: string; source_ref?: string }
+) =>
+  sidecar<{ id?: number; chars?: number; error?: string; message?: string }>(
+    `/ai/agents/${agentId}/documents`,
+    { method: "POST", ...jbody(b) }
+  );
+export const deleteAiDocument = (id: number) =>
+  sidecar<{ ok?: boolean }>(`/ai/documents/${id}`, { method: "DELETE" });
+export const reindexAiDocument = (id: number) =>
+  sidecar<{ ok?: boolean; error?: string; message?: string }>(`/ai/documents/${id}/reindex`, { method: "POST" });
+
+// Sobe o ARQUIVO (bytes) para a pasta-sandbox e devolve o caminho aceito pela
+// ingestão. O front nunca manda caminho do disco — ver net-guard.mjs.
+export const uploadAiFile = (file: File) =>
+  file.arrayBuffer().then((buf) =>
+    sidecar<{ stored_path: string; name: string; bytes: number }>("/ai/upload", {
+      method: "POST",
+      headers: {
+        "content-type": file.type || "application/octet-stream",
+        "x-filename": encodeURIComponent(file.name),
+      },
+      body: buf,
+    })
+  );
+
+export const testAiSearch = (agentId: number, question: string) =>
+  sidecar<{
+    min_similarity: number;
+    hits: Array<{ document_id: number; score: number; passa: boolean; trecho: string }>;
+    error?: string;
+    message?: string;
+  }>(`/ai/agents/${agentId}/search`, { method: "POST", ...jbody({ question }) });
+
+export const listAiBindings = () => sidecar<{ bindings: AiBinding[] }>("/ai/bindings");
+export const createAiBinding = (b: NewAiBinding) =>
+  sidecar<{ id?: number; error?: string; message?: string }>("/ai/bindings", { method: "POST", ...jbody(b) });
+export const updateAiBinding = (id: number, b: NewAiBinding) =>
+  sidecar<{ ok?: boolean; error?: string; message?: string }>(`/ai/bindings/${id}`, { method: "PUT", ...jbody(b) });
+export const deleteAiBinding = (id: number) =>
+  sidecar<{ ok?: boolean }>(`/ai/bindings/${id}`, { method: "DELETE" });
+
+export const listAiEvents = (limit = 50) => sidecar<{ events: AiEvent[] }>(`/ai/events?limit=${limit}`);

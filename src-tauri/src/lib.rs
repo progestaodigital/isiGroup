@@ -4,6 +4,7 @@
 mod entitlement;
 mod hwid;
 mod license;
+mod openai_key;
 mod sidecar;
 
 use license::LicenseState;
@@ -147,6 +148,10 @@ pub fn run() {
             clear_license,
             get_hwid_masked,
             get_app_version,
+            openai_key::set_openai_key,
+            openai_key::get_openai_key,
+            openai_key::get_openai_key_masked,
+            openai_key::clear_openai_key,
         ])
         .build(tauri::generate_context!())
         .expect("erro ao iniciar a isigroup");

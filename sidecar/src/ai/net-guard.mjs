@@ -1,0 +1,180 @@
+// Guardas de rede e de disco para a ingestao de conhecimento.
+//
+// Por que existe: as duas fontes "externas" (URL e arquivo) recebem um alvo
+// escolhido pelo chamador, e o conteudo ingerido volta legivel pelas respostas
+// do agente e pela busca de teste. Sem guarda, as duas viram exfiltracao:
+//   * URL  -> SSRF: buscar http://127.0.0.1:porta, painel do roteador, intranet.
+//   * File -> ler id_rsa, o proprio isigroup.db, qualquer coisa do disco.
+//
+// O token de sessao NAO basta como protecao: a ponte MCP existe para uma IA
+// externa operar o app, e planos isiplan vem de fora.
+
+import { lookup } from 'node:dns/promises';
+import { realpathSync, mkdirSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
+
+const MAX_REDIRECTS = 3;
+const FETCH_TIMEOUT_MS = 30000;
+const MAX_BYTES = 5 * 1024 * 1024; // pagina de documentacao nao passa disso
+
+// --- Faixas de IP bloqueadas ---
+
+const v4Blocked = [
+  [[0, 0, 0, 0], 8],        // "this network"
+  [[10, 0, 0, 0], 8],       // privada
+  [[100, 64, 0, 0], 10],    // CGNAT
+  [[127, 0, 0, 0], 8],      // loopback
+  [[169, 254, 0, 0], 16],   // link-local
+  [[172, 16, 0, 0], 12],    // privada
+  [[192, 0, 0, 0], 24],     // IETF protocol assignments
+  [[192, 168, 0, 0], 16],   // privada
+  [[198, 18, 0, 0], 15],    // benchmarking
+  [[224, 0, 0, 0], 4],      // multicast
+  [[240, 0, 0, 0], 4],      // reservado (inclui 255.255.255.255)
+];
+
+const inV4Range = (octets, [base, bits]) => {
+  const toInt = (o) => ((o[0] << 24) >>> 0) + (o[1] << 16) + (o[2] << 8) + o[3];
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  return (toInt(octets) & mask) === (toInt(base) & mask);
+};
+
+export function isBlockedIp(ip) {
+  if (!ip) return true;
+  let addr = String(ip).toLowerCase().trim();
+
+  // IPv6 com escopo (fe80::1%eth0) e colchetes.
+  addr = addr.replace(/^\[|\]$/g, '').split('%')[0];
+
+  // IPv4 puro ou IPv4 mapeado em IPv6 (::ffff:127.0.0.1) — valem as regras v4.
+  const v4 = addr.startsWith('::ffff:') ? addr.slice(7) : addr;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(v4);
+  if (m) {
+    const oct = m.slice(1).map(Number);
+    if (oct.some((o) => o > 255)) return true;
+    return v4Blocked.some((r) => inV4Range(oct, r));
+  }
+
+  // IPv6
+  if (addr === '::1' || addr === '::') return true;          // loopback / nao especificado
+  if (/^f[cd][0-9a-f]{2}:/.test(addr)) return true;          // fc00::/7 unique-local
+  if (/^fe[89ab][0-9a-f]:/.test(addr)) return true;          // fe80::/10 link-local
+  if (/^ff[0-9a-f]{2}:/.test(addr)) return true;             // multicast
+  return false;
+}
+
+// Resolve o host e recusa se QUALQUER endereco cair em faixa bloqueada.
+// Checar todos evita o caso de um host com registro publico e privado ao mesmo
+// tempo (nao fecha a janela de DNS rebinding, mas fecha o caso trivial).
+export async function assertPublicHost(hostname) {
+  // IP literal na URL: valida direto, sem DNS.
+  if (/^[\d.]+$/.test(hostname) || hostname.includes(':')) {
+    if (isBlockedIp(hostname)) throw new Error('endereco de rede interna nao e permitido');
+    return;
+  }
+  let addrs;
+  try {
+    addrs = await lookup(hostname, { all: true });
+  } catch {
+    throw new Error(`nao foi possivel resolver o endereco "${hostname}"`);
+  }
+  if (!addrs.length) throw new Error(`nao foi possivel resolver o endereco "${hostname}"`);
+  if (addrs.some((a) => isBlockedIp(a.address))) {
+    throw new Error('este endereco aponta para a rede interna e nao pode ser lido');
+  }
+}
+
+// Busca uma URL publica seguindo redirecionamentos MANUALMENTE, revalidando o
+// destino a cada salto. Sem isso, uma URL publica redirecionaria para
+// 127.0.0.1 e o guard do primeiro salto nao valeria de nada.
+export async function safeFetchText(rawUrl) {
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error('URL invalida');
+  }
+
+  for (let hop = 0; ; hop++) {
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      throw new Error('somente http e https sao aceitos');
+    }
+    await assertPublicHost(url.hostname);
+
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
+    let res;
+    try {
+      res = await fetch(url, {
+        signal: ctl.signal,
+        redirect: 'manual', // nos seguimos, revalidando cada destino
+        headers: { 'user-agent': 'Mozilla/5.0 (compatible; isigroup)' },
+      });
+    } catch (e) {
+      clearTimeout(timer);
+      throw e?.name === 'AbortError' ? new Error('a pagina demorou demais para responder') : e;
+    }
+
+    if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+      clearTimeout(timer);
+      if (hop >= MAX_REDIRECTS) throw new Error('redirecionamentos demais');
+      url = new URL(res.headers.get('location'), url); // relativo tambem resolve
+      continue;
+    }
+
+    try {
+      if (!res.ok) throw new Error(`a pagina respondeu HTTP ${res.status}`);
+      const len = Number(res.headers.get('content-length') ?? 0);
+      if (len > MAX_BYTES) throw new Error('pagina grande demais');
+      const text = await readCapped(res, MAX_BYTES);
+      return { text, contentType: res.headers.get('content-type') ?? '' };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
+// Le o corpo com teto de bytes (content-length pode faltar ou mentir).
+async function readCapped(res, max) {
+  if (!res.body) return await res.text();
+  const chunks = [];
+  let total = 0;
+  for await (const c of res.body) {
+    total += c.length;
+    if (total > max) throw new Error('pagina grande demais');
+    chunks.push(c);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+// --- Sandbox de arquivos ---
+
+// Arquivos de conhecimento so podem ser lidos de UM diretorio controlado, no
+// qual o proprio app escreve (via /ai/upload). Caminho arbitrario vindo do
+// cliente le qualquer coisa do disco — e o conteudo volta pelas respostas.
+let uploadsDir = null;
+
+export function setUploadsDir(dir) {
+  mkdirSync(dir, { recursive: true });
+  uploadsDir = realpathSync(dir);
+  return uploadsDir;
+}
+
+export const getUploadsDir = () => uploadsDir;
+
+// Devolve o caminho real se estiver DENTRO do sandbox; lanca caso contrario.
+// Usa realpath nos dois lados: resolve "..", links simbolicos e juncoes do
+// Windows, entao nao da para escapar por atalho.
+export function assertInsideUploads(path) {
+  if (!uploadsDir) throw new Error('diretorio de uploads nao inicializado');
+  let real;
+  try {
+    real = realpathSync(resolve(path));
+  } catch {
+    throw new Error('arquivo nao encontrado');
+  }
+  if (real !== uploadsDir && !real.startsWith(uploadsDir + sep)) {
+    throw new Error('este arquivo esta fora da pasta de uploads do isigroup');
+  }
+  return real;
+}

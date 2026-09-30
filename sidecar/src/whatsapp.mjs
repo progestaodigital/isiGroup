@@ -46,6 +46,14 @@ const MAX_BACKOFF_MS = 30_000;
 // ficar "Estabelecendo conexao" para sempre (tipico de rede/firewall/AV bloqueando
 // os servidores do WhatsApp). O usuario ve o erro e pode tentar de novo.
 const MAX_RECONNECT_ATTEMPTS = 5;
+
+// Depois das tentativas rapidas (que somam ~60s), a sessao NAO desiste de vez:
+// passa a tentar de minuto em minuto, para sempre. Quedas transitorias —
+// hibernacao, suspensao, trocar de Wi-Fi, internet do predio caindo — levam
+// mais de 60s para se resolver, e desistir nelas deixava o chip morto ate
+// alguem clicar em Conectar (sem chip, nao ha evento, logo nao ha webhook).
+// Logout e badSession continuam parando de vez: esses exigem QR novo.
+const SLOW_RETRY_MS = 60_000;
 // Teto para a busca da versao do WhatsApp Web. Ver fetchWaVersion abaixo.
 const VERSION_FETCH_TIMEOUT_MS = 5_000;
 // Versao conhecida-boa do WhatsApp Web, capturada em 2026-08-17. FALLBACK quando
@@ -199,6 +207,7 @@ export function createWhatsApp(db, sessionRootDir) {
           qr: st?.qr ?? null,
           me: st?.me ?? null,
           last_error: st?.last_error ?? null,
+          retrying: !!st?.retrying,
           groups,
           admin_groups: admin,
         };
@@ -354,15 +363,20 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
     qr: null,
     me: null,
     last_error: null,
+    retrying: false, // true = desconectado mas ainda tentando sozinho
   };
 
   function getState() {
-    return { account_id: accountId, status: state.status, qr: state.qr, me: state.me, last_error: state.last_error };
+    return { account_id: accountId, status: state.status, qr: state.qr, me: state.me, last_error: state.last_error, retrying: state.retrying };
   }
 
   async function start() {
     if (starting || state.status === 'connected') return;
+    // Mata uma re-tentativa lenta pendente: vamos conectar agora de qualquer
+    // forma, e um timer orfao dispararia no meio da conexao manual.
+    clearTimeout(reconnectTimer);
     starting = true;
+    state.retrying = false;
     state.status = 'connecting';
     state.qr = null;
     state.last_error = null;
@@ -489,6 +503,8 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
 
     if (connection === 'open') {
       reconnectAttempts = 0;
+      state.retrying = false;
+      clearTimeout(reconnectTimer);
       state.status = 'connected';
       state.qr = null;
       state.last_error = null;
@@ -518,19 +534,27 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
         // else e reconectava recarregando as MESMAS creds ruins — loop sem QR.
         state.status = 'disconnected';
         state.qr = null;
+        state.retrying = false;
         reconnectAttempts = 0;
+        clearTimeout(reconnectTimer); // nao re-tentar: precisa de QR novo
         db.prepare("UPDATE accounts SET status = 'disconnected' WHERE id = ?").run(accountId);
         rm(sessionDir, { recursive: true, force: true }).catch(() => {});
         const motivo = loggedOut ? 'logout' : 'sessao corrompida (badSession)';
         console.error(`[wa:${accountId}] ${motivo} — credenciais limpas p/ novo QR.`);
       } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-        // Nao reconecta em silencio para sempre: para e mostra o motivo na UI.
+        // Esgotou as tentativas rapidas. NAO desiste: desacelera para 1/min e
+        // segue tentando, para se curar sozinho quando a rede voltar. O erro
+        // continua visivel na UI para o problema nao passar despercebido.
         state.status = 'disconnected';
         state.qr = null;
-        state.last_error = `Não foi possível conectar após ${MAX_RECONNECT_ATTEMPTS} tentativas (code ${code ?? '?'}). Verifique internet, firewall ou antivírus.`;
-        reconnectAttempts = 0;
+        state.retrying = true;
+        state.last_error =
+          `Sem conexão (code ${code ?? '?'}). Tentando reconectar a cada minuto — ` +
+          `se persistir, verifique internet, firewall ou antivírus.`;
         db.prepare("UPDATE accounts SET status = 'disconnected' WHERE id = ?").run(accountId);
-        console.error(`[wa:${accountId}] desisti apos ${MAX_RECONNECT_ATTEMPTS} tentativas (code ${code}).`);
+        console.error(`[wa:${accountId}] tentativas rapidas esgotadas (code ${code}); re-tentando a cada ${SLOW_RETRY_MS / 1000}s.`);
+        clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(() => start(), SLOW_RETRY_MS);
       } else {
         state.status = 'connecting';
         reconnectAttempts += 1;
@@ -553,6 +577,7 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
     state.status = 'disconnected';
     state.qr = null;
     state.me = null;
+    state.retrying = false;
     reconnectAttempts = 0;
     await rm(sessionDir, { recursive: true, force: true }).catch(() => {});
     db.prepare("UPDATE accounts SET status = 'disconnected' WHERE id = ?").run(accountId);

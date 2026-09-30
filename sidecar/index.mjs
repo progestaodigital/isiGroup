@@ -6,7 +6,7 @@
 import { createServer } from 'node:http';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { rmSync, existsSync, readFileSync, copyFileSync } from 'node:fs';
+import { rmSync, existsSync, readFileSync, copyFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { openDatabase } from './src/db.mjs';
 import { createWhatsApp } from './src/whatsapp.mjs';
 import { createScheduler } from './src/scheduler.mjs';
@@ -16,6 +16,9 @@ import { createBulk } from './src/bulk.mjs';
 import { createPlans, schemaDoc } from './src/plans.mjs';
 import { createIntegration } from './src/integration.mjs';
 import { weekAllows, parityToCols, colsToParity } from './src/weeks.mjs';
+import { createAi } from './src/ai/agents.mjs';
+import { setUploadsDir } from './src/ai/net-guard.mjs';
+import { createResponder } from './src/ai/responder.mjs';
 
 // Nome/versão vêm do package.json (copiado ao lado deste módulo no bundle),
 // para o /health nunca defasar em relação à versão real publicada.
@@ -44,6 +47,10 @@ try {
 const dataDir = dirname(DB_PATH);
 const sessionDir = join(dataDir, 'wa-session');
 const mediaDir = join(dataDir, 'media');
+// Sandbox dos arquivos de conhecimento: o unico diretorio de onde a ingestao
+// aceita ler. Ver net-guard.mjs — caminho arbitrario do cliente viraria
+// leitura de qualquer arquivo do disco, exfiltrada pelas respostas do agente.
+const aiUploadsDir = join(dataDir, 'ai-uploads');
 const wa = createWhatsApp(db, sessionDir);
 
 // Worker do agendador: re-hidrata a fila e dispara no horario.
@@ -56,11 +63,30 @@ const editionState = { edition: 'free' };
 
 // Automacoes & gatilhos: mensagem + entrada/saida de membros.
 const automation = createAutomation(db, wa, editionState);
-wa.setMessageHandler(automation.onMessage);
 wa.setMembershipHandler(automation.onMembership);
 
 // Acoes em massa (bulk): fila propria no SQLite, retomada no arranque.
 const bulk = createBulk(db, wa);
+const ai = createAi(db);
+setUploadsDir(aiUploadsDir);
+
+// Agentes de IA: respondem no grupo em paralelo as automacoes. Ha UM handler
+// de mensagem no pool, entao os dois sao compostos aqui — cada um isola o
+// proprio erro para que uma falha nao impeca o outro de rodar.
+// Recurso Pro: gating no MOTOR, nao so na UI.
+const aiResponder = createResponder(db, wa);
+wa.setMessageHandler(async (info) => {
+  await Promise.allSettled([
+    Promise.resolve(automation.onMessage(info)).catch((e) =>
+      console.error('[auto] erro no handler:', e?.message)
+    ),
+    editionState.edition === 'pro'
+      ? Promise.resolve(aiResponder.onMessage(info)).catch((e) =>
+          console.error('[ai] erro no handler:', e?.message)
+        )
+      : Promise.resolve(),
+  ]);
+});
 bulk.start();
 
 // Planos de acao (isiplan): importacao declarativa gerada por IA. O executor
@@ -408,6 +434,121 @@ async function route(req, res, url) {
   if (method === 'POST' && bulkCancel) {
     const r = bulk.cancel(Number(bulkCancel[1]));
     if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    return json(res, 200, { ok: true });
+  }
+
+  // --- Agentes de IA (RAG + triagem) ---
+  // A chave da OpenAI vive no keyring do SO; o front a injeta aqui a cada
+  // arranque e ela fica SO em memoria (nunca toca o SQLite).
+  if (match('POST', '/ai/key')) {
+    const b = await readJson(req);
+    return json(res, 200, ai.applyKey(b?.key));
+  }
+  if (match('POST', '/ai/key/validate')) {
+    return json(res, 200, await ai.validateKey());
+  }
+  // Recebe o ARQUIVO (bytes) e grava no sandbox; devolve o caminho que a
+  // ingestao aceita. Espelha /media/upload — o front nunca manda caminho.
+  if (match('POST', '/ai/upload')) {
+    const buf = await readBuffer(req, 50 * 1024 * 1024);
+    if (!buf || buf.length === 0) return json(res, 400, { error: 'bad_request', message: 'arquivo vazio' });
+    const filename = decodeURIComponent(req.headers['x-filename'] || 'arquivo');
+    const ext = extname(filename).toLowerCase();
+    if (!['.txt', '.md', '.markdown', '.csv', '.json', '.log', '.pdf', '.docx'].includes(ext)) {
+      return json(res, 400, { error: 'bad_request', message: `formato nao suportado: ${ext || 'sem extensao'} (use .txt, .md, .pdf ou .docx)` });
+    }
+    mkdirSync(aiUploadsDir, { recursive: true });
+    const stored = join(aiUploadsDir, `${Date.now()}-${Math.floor(Math.random() * 1e6)}${ext}`);
+    writeFileSync(stored, buf);
+    return json(res, 200, { stored_path: stored, name: filename, bytes: buf.length });
+  }
+  if (match('GET', '/ai/status')) {
+    return json(res, 200, ai.status());
+  }
+
+  if (match('GET', '/ai/agents')) {
+    return json(res, 200, { agents: ai.listAgents() });
+  }
+  if (match('POST', '/ai/agents')) {
+    const r = ai.createAgent(await readJson(req));
+    if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
+    return json(res, 201, { id: r.id });
+  }
+  const agentId = path.match(/^\/ai\/agents\/(\d+)$/);
+  if (method === 'GET' && agentId) {
+    const a = ai.getAgent(Number(agentId[1]));
+    return a ? json(res, 200, { agent: a }) : json(res, 404, { error: 'not_found' });
+  }
+  if (method === 'PUT' && agentId) {
+    const r = ai.updateAgent(Number(agentId[1]), await readJson(req));
+    if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
+    return json(res, 200, { ok: true });
+  }
+  if (method === 'DELETE' && agentId) {
+    const r = ai.deleteAgent(Number(agentId[1]));
+    if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
+    return json(res, 200, { ok: true });
+  }
+
+  const agentDocs = path.match(/^\/ai\/agents\/(\d+)\/documents$/);
+  if (method === 'GET' && agentDocs) {
+    return json(res, 200, { documents: ai.listDocuments(Number(agentDocs[1])) });
+  }
+  if (method === 'POST' && agentDocs) {
+    const r = await ai.addDocument(Number(agentDocs[1]), await readJson(req));
+    if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
+    return json(res, 201, { id: r.id, chars: r.chars });
+  }
+  const agentSearch = path.match(/^\/ai\/agents\/(\d+)\/search$/);
+  if (method === 'POST' && agentSearch) {
+    const b = await readJson(req);
+    const r = await ai.testSearch(Number(agentSearch[1]), b?.question);
+    if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
+    return json(res, 200, r);
+  }
+
+  // Vinculos grupo <-> agente (ou triagem).
+  if (match('GET', '/ai/bindings')) {
+    return json(res, 200, { bindings: ai.listBindings() });
+  }
+  if (match('POST', '/ai/bindings')) {
+    const r = ai.createBinding(await readJson(req));
+    if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
+    return json(res, 201, { id: r.id });
+  }
+  const bindId = path.match(/^\/ai\/bindings\/(\d+)$/);
+  if (method === 'PUT' && bindId) {
+    const r = ai.updateBinding(Number(bindId[1]), await readJson(req));
+    if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
+    return json(res, 200, { ok: true });
+  }
+  if (method === 'DELETE' && bindId) {
+    const r = ai.deleteBinding(Number(bindId[1]));
+    if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    return json(res, 200, { ok: true });
+  }
+
+  // Log de decisoes/respostas — calibrar limiar e descricoes.
+  if (match('GET', '/ai/events')) {
+    return json(res, 200, { events: ai.listEvents(Number(url.searchParams.get('limit')) || 50) });
+  }
+
+  const docId = path.match(/^\/ai\/documents\/(\d+)$/);
+  if (method === 'DELETE' && docId) {
+    const r = ai.deleteDocument(Number(docId[1]));
+    if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    return json(res, 200, { ok: true });
+  }
+  const docReindex = path.match(/^\/ai\/documents\/(\d+)\/reindex$/);
+  if (method === 'POST' && docReindex) {
+    const r = ai.reindexDocument(Number(docReindex[1]));
+    if (r.error === 'not_found') return json(res, 404, { error: 'not_found' });
+    if (r.error) return json(res, 400, { error: 'bad_request', message: r.error });
     return json(res, 200, { ok: true });
   }
 

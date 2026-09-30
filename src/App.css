@@ -712,3 +712,36 @@ select option:disabled { color: rgba(26, 26, 26, 0.45); }
   padding: 9px 12px;
 }
 .code-line code { flex: 1; overflow-x: auto; white-space: nowrap; }
+
+/* Botão secundário (cancelar edição, fechar formulário): mesma altura do
+   primário, sem o peso visual — não compete com a ação principal. */
+button.ghost {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+button.ghost:hover:not(:disabled) { color: var(--text); border-color: var(--text); }
+
+/* Sliders (corte de semelhança, tentativas da triagem). */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  outline: none;
+  padding: 0;
+  margin: 10px 0 4px;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: none;
+}
+input[type="range"]:focus { box-shadow: 0 0 0 3px rgba(204, 255, 0, 0.13); }
