@@ -118,6 +118,51 @@ export async function fetchWaVersion(cacheDir) {
 }
 
 // ===========================================================================
+//  LIMPEZA DE ALVOS — grupos que perderam o chip de origem
+// ===========================================================================
+
+// Remove linhas de `targets` por id, junto com o que as referencia.
+// `schedule_targets.target_id -> targets.id` e FK: as entradas de agendamento
+// que apontam para o grupo removido saem ANTES (senao o DELETE viola a FK) —
+// mesmo tratamento que `removeAccount` ja da ao excluir um chip inteiro.
+export function deleteTargetsByIds(db, ids) {
+  if (!ids.length) return 0;
+  let removed = 0;
+  for (let i = 0; i < ids.length; i += 200) {
+    const chunk = ids.slice(i, i + 200);
+    const ph = chunk.map(() => '?').join(',');
+    db.prepare(`DELETE FROM schedule_targets WHERE target_id IN (${ph})`).run(...chunk);
+    removed += db.prepare(`DELETE FROM targets WHERE id IN (${ph})`).run(...chunk).changes;
+  }
+  return removed;
+}
+
+// Grupos cujo chip de origem nao existe mais (conta apagada, ou account_id nulo
+// de bases antigas). `listTargets` ate os esconde da lista, mas /coverage,
+// exportacao, planos e os agentes leem `targets` cru e os ressuscitariam —
+// entao a remocao e definitiva, no banco.
+export function pruneOrphanTargets(db) {
+  const ids = db
+    .prepare(
+      'SELECT id FROM targets WHERE account_id IS NULL OR account_id NOT IN (SELECT id FROM accounts)'
+    )
+    .all()
+    .map((r) => r.id);
+  if (!ids.length) return 0;
+  db.exec('BEGIN;');
+  try {
+    const n = deleteTargetsByIds(db, ids);
+    db.exec('COMMIT;');
+    console.error(`[wa] ${n} grupo(s) sem chip de origem removido(s).`);
+    return n;
+  } catch (e) {
+    db.exec('ROLLBACK;');
+    console.error(`[wa] falha ao remover grupos sem chip de origem: ${e?.message}`);
+    return 0;
+  }
+}
+
+// ===========================================================================
 //  POOL — gerencia N sessoes (chips). API single-chip delega para a primaria.
 // ===========================================================================
 
@@ -129,6 +174,7 @@ export function createWhatsApp(db, sessionRootDir) {
   mkdirSync(sessionRootDir, { recursive: true });
   migrateLegacySession(sessionRootDir);
   ensurePrimaryAccount(db);
+  pruneOrphanTargets(db);
 
   const sessionDirFor = (accountId) => join(sessionRootDir, String(accountId));
 
@@ -156,19 +202,22 @@ export function createWhatsApp(db, sessionRootDir) {
       .filter(([, s]) => s.isConnected())
       .map(([id]) => id);
     if (ids.length === 0) throw new Error('WhatsApp nao conectado');
-    const total = { synced: 0, admin: 0, communities: 0, accounts: [] };
+    const total = { synced: 0, admin: 0, communities: 0, pruned: 0, accounts: [] };
     for (const id of ids) {
       try {
         const r = await getSession(id).syncTargets();
         total.synced += r.synced;
         total.admin += r.admin;
         total.communities += r.communities;
+        total.pruned += r.pruned ?? 0;
         total.accounts.push({ account_id: id, ...r });
       } catch (e) {
         console.error(`[wa] sync da conta ${id} falhou: ${e?.message}`);
         total.accounts.push({ account_id: id, error: e?.message ?? 'erro' });
       }
     }
+    // Sobras de chips que nao existem mais no app (conta removida): somem aqui.
+    total.pruned += pruneOrphanTargets(db);
     return total;
   }
 
@@ -284,7 +333,11 @@ export function createWhatsApp(db, sessionRootDir) {
     startAccount: (id) => getSession(id).start(),
     logoutAccount: (id) => getSession(id).logout(),
     getAccountState: (id) => getSession(id).getState(),
-    syncTargetsForAccount: (id) => getSession(id).syncTargets(),
+    syncTargetsForAccount: async (id) => {
+      const r = await getSession(id).syncTargets();
+      // Mesma varredura do botao global: grupos de chips que nao existem mais.
+      return { ...r, pruned: (r.pruned ?? 0) + pruneOrphanTargets(db) };
+    },
     syncAllTargets,
     isAccountConnected: (id) => getSession(id).isConnected(),
     accountSend: (id, jid, content) => getSession(id).sendContent(jid, content),
@@ -584,6 +637,34 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
   }
 
   function updateAccountOnConnect(me) {
+    // Numero DIFERENTE no mesmo slot de chip (perdeu o chip e leu o QR com
+    // outro): os grupos gravados eram do numero anterior e ficaram sem dono.
+    // Apaga ja na conexao — nao precisa esperar a proxima sync para sumir.
+    const prev = db.prepare('SELECT jid FROM accounts WHERE id = ?').get(accountId);
+    // Normaliza os dois lados: a coluna ja e gravada normalizada, mas um jid
+    // legado com sufixo de dispositivo (`:12@...`) nao pode passar por "mudou".
+    const prevJid = prev?.jid ? jidNormalizedUser(prev.jid) : null;
+    if (prevJid && me.jid && prevJid !== me.jid) {
+      const ids = db
+        .prepare('SELECT id FROM targets WHERE account_id = ?')
+        .all(accountId)
+        .map((t) => t.id);
+      if (ids.length) {
+        db.exec('BEGIN;');
+        try {
+          deleteTargetsByIds(db, ids);
+          db.exec('COMMIT;');
+          console.error(
+            `[wa:${accountId}] numero mudou (${maskId(prevJid)} -> ${maskId(me.jid)}): ` +
+              `${ids.length} grupo(s) do numero anterior removido(s).`
+          );
+        } catch (e) {
+          db.exec('ROLLBACK;');
+          console.error(`[wa:${accountId}] falha ao limpar grupos do numero anterior: ${e?.message}`);
+        }
+      }
+    }
+
     const r = db
       .prepare("UPDATE accounts SET jid = ?, label = COALESCE(label, ?), session_path = ?, status = 'connected' WHERE id = ?")
       .run(me.jid, me.name ?? 'Conta principal', sessionDir, accountId);
@@ -726,6 +807,28 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
         last_synced_at = excluded.last_synced_at
     `);
 
+    // O que este chip tinha no banco e NAO veio nesta sync: ele saiu do grupo,
+    // o grupo acabou, ou os registros eram de um numero anterior neste mesmo
+    // slot de chip. Em qualquer caso o grupo perdeu o chip de origem e some —
+    // `groupFetchAllParticipating` e a lista completa do chip, nao um delta.
+    const seen = new Set(rows.map((r) => r.jid));
+    const staleIds = db
+      .prepare('SELECT id, jid FROM targets WHERE account_id = ?')
+      .all(accountId)
+      .filter((r) => !seen.has(r.jid))
+      .map((r) => r.id);
+
+    // Guarda: 0 grupos vindos do WhatsApp com alvos no banco e quase sempre
+    // sync parcial / rate limit, nao "o chip saiu de tudo" — nao poda nesse
+    // caso (apagar 400 grupos por um fetch vazio seria irreversivel).
+    const suspectEmpty = rows.length === 0 && staleIds.length > 0;
+    if (suspectEmpty) {
+      console.error(
+        `[wa:${accountId}] sync devolveu 0 grupos com ${staleIds.length} no banco — ` +
+          'poda adiada (provavel sync parcial).'
+      );
+    }
+
     db.exec('BEGIN;');
     try {
       for (const r of rows) {
@@ -739,16 +842,23 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
           last_synced_at: r.last_synced_at,
         });
       }
+      if (!suspectEmpty) deleteTargetsByIds(db, staleIds);
       db.exec('COMMIT;');
     } catch (e) {
       db.exec('ROLLBACK;');
       throw e;
     }
 
+    const pruned = suspectEmpty ? 0 : staleIds.length;
+    if (pruned) {
+      console.error(`[wa:${accountId}] ${pruned} grupo(s) obsoleto(s) removido(s) desta conta.`);
+    }
+
     return {
       synced: rows.length,
       admin: rows.filter((r) => r.is_admin).length,
       communities: comm.length,
+      pruned,
     };
   }
 

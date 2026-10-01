@@ -175,6 +175,24 @@ async function route(req, res, url) {
     return json(res, 200, { edition: editionState.edition });
   }
 
+  // --- Gate Pro: Agentes de IA, Planos & IA e Exportar ---
+  // No MOTOR, nao so na UI: o front nao e a unica porta destas rotas — a ponte
+  // MCP e o executor de planos batem nelas direto, com o mesmo token de sessao.
+  // Fica ANTES de todas elas para nao depender de lembrar o gate rota a rota.
+  const proOnly =
+    path.startsWith('/ai/') ||
+    path.startsWith('/plans/') ||
+    path === '/integration' ||
+    path.startsWith('/integration/') ||
+    path === '/export' ||
+    path.startsWith('/export/');
+  if (proOnly && editionState.edition !== 'pro') {
+    return json(res, 403, {
+      error: 'pro_required',
+      message: 'Agentes de IA, Planos & IA e Exportar sao exclusivos do plano Pro.',
+    });
+  }
+
   if (match('GET', '/health')) {
     const migrations = db.prepare('SELECT COUNT(*) AS n FROM _migrations').get().n;
     return json(res, 200, {

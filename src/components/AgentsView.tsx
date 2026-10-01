@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ProLock } from "./ProLock";
 import {
   AiAgent,
   AiBinding,
@@ -88,19 +89,10 @@ export function AgentsView({ isPro }: { isPro: boolean }) {
 
   if (!isPro) {
     return (
-      <div>
-        <div className="head-row">
-          <div>
-            <h1>Agentes de IA</h1>
-            <p className="muted">Agentes que respondem no grupo com base no seu conhecimento.</p>
-          </div>
-        </div>
-        <div className="card empty">
-          <p className="muted">
-            Recurso disponível na edição <b>Pro</b>.
-          </p>
-        </div>
-      </div>
+      <ProLock
+        title="Agentes de IA"
+        subtitle="Agentes que respondem no grupo com base no seu conhecimento."
+      />
     );
   }
 

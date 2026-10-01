@@ -30,7 +30,13 @@ export function TargetsView() {
       if (r.error) {
         setMsg(r.message ?? "Conecte o WhatsApp antes de sincronizar.");
       } else {
-        setMsg(`${r.synced} grupos sincronizados — ${r.admin} como admin, ${r.communities} de comunidade.`);
+        const pruned = r.pruned ?? 0;
+        setMsg(
+          `${r.synced} grupos sincronizados — ${r.admin} como admin, ${r.communities} de comunidade.` +
+            (pruned
+              ? ` ${pruned} grupo(s) removido(s): não pertencem mais a nenhum chip conectado.`
+              : "")
+        );
         await load();
       }
     } finally {
@@ -43,7 +49,10 @@ export function TargetsView() {
   return (
     <div>
       <h1>Grupos & Comunidades</h1>
-      <p className="muted">Alvos sincronizados da conta conectada.</p>
+      <p className="muted">
+        Alvos dos chips conectados. Ao sincronizar, grupos que não pertencem mais a
+        nenhum chip conectado são removidos.
+      </p>
 
       <div className="toolbar">
         <button onClick={sync} disabled={busy}>

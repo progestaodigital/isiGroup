@@ -234,6 +234,8 @@ export interface SyncResult {
   synced?: number;
   admin?: number;
   communities?: number;
+  /** Grupos removidos por terem perdido o chip de origem. */
+  pruned?: number;
   error?: string;
   message?: string;
 }

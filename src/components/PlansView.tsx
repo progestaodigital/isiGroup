@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ProLock } from "./ProLock";
 import {
   IntegrationLogRow,
   IntegrationStatus,
@@ -57,18 +58,29 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-export function PlansView() {
+export function PlansView({ isPro }: { isPro: boolean }) {
   const [runs, setRuns] = useState<PlanRunRow[]>([]);
 
   const refresh = useCallback(() => {
+    if (!isPro) return;
     listPlanRuns().then((r) => setRuns(r.runs)).catch(() => {});
-  }, []);
+  }, [isPro]);
 
   useEffect(() => {
+    if (!isPro) return;
     refresh();
     const t = window.setInterval(refresh, 3000);
     return () => window.clearInterval(t);
-  }, [refresh]);
+  }, [refresh, isPro]);
+
+  if (!isPro) {
+    return (
+      <ProLock
+        title="Planos & IA"
+        subtitle="Importe planos de ação gerados por IA e deixe IAs locais controlarem o isigroup via MCP."
+      />
+    );
+  }
 
   return (
     <div>

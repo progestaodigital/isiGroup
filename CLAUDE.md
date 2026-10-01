@@ -58,12 +58,19 @@ em `LicenseState.edition`. HWID = `sha256(CPU+placa+disco)` com prefixo `isigrou
 Consome **apenas** `/v1/license/validate` — sem rotas Bearer-gated.
 
 A edição propaga para o sidecar via `POST /edition` (`MainShell` chama `setSidecarEdition`),
-que controla o **gating** dos recursos Pro **no motor** (não só na UI).
+que controla o **gating** dos recursos Pro **no motor** (não só na UI). São Pro:
+**multi-chip** (2º chip no `/accounts` e no `/accounts/:id/connect`), **automação em
+grupo onde não é admin** (`automation.mjs::allowedByEdition`), o **responder de IA**
+(handler em `index.mjs`), e — por um **gate de prefixo de rota** no topo do `route()` —
+**Agentes de IA** (`/ai/*`), **Planos & IA** (`/plans/*`, `/integration*`) e
+**Exportar** (`/export*`). O gate de prefixo existe porque a UI não é a única porta:
+a ponte MCP e o executor de planos batem nessas rotas direto.
 
 ## Modelo de dados e fluxos (o que exige ler vários arquivos)
 
 - **SQLite via `node:sqlite`** (não better-sqlite3 — evita toolchain nativo). Sem helper de transação: usar `db.exec('BEGIN'/'COMMIT'/'ROLLBACK')` manual. Migrations em `sidecar/migrations/NNN_*.sql`, aplicadas uma vez e rastreadas em `_migrations` (`db.mjs`). **Toda mudança de schema é uma migration nova; nunca editar as existentes.**
 - **Pool multi-chip** (`whatsapp.mjs`): `createWhatsApp` gerencia `Map<accountId, session>`; cada conta tem `sock`/estado/cache/dir de auth (`wa-session/<accountId>/`) isolados. **As funções single-chip (`start`/`sendContent`/`syncTargets`…) delegam para a conta primária (menor id)** — com 1 chip o comportamento é idêntico ao legado. Há também a API por conta (`startAccount`/`accountSend`/`isAccountConnected`…). `account_id` é FK em `targets`/`schedules`/`automation_rules`/`schedule_targets`/`automation_logs`.
+- **Sync de alvos é AUTORITATIVO, não incremental** (`syncTargets`): `groupFetchAllParticipating` devolve a lista completa do chip, então o que estava em `targets` para aquele `account_id` e não voltou é **apagado** (junto com as `schedule_targets` que o referenciam — FK). Guarda: fetch vazio com alvos no banco não poda (sync parcial). `pruneOrphanTargets` (arranque + toda sync) remove grupos cujo chip de origem sumiu. E trocar o número no mesmo slot de chip apaga os grupos do número anterior já na conexão (`updateAccountOnConnect`).
 - **Disparo group-first** (`SchedulerView` + `index.mjs::createSchedule` + `scheduler.mjs`): o usuário seleciona **grupos distintos** e **chips**; o front resolve o roteamento (round-robin por grupo entre chips que cobrem o grupo, via `/coverage`) e envia `targets: [{target_id, account_id, skipped?}]`. O scheduler envia cada alvo pelo chip do `account_id` (`sendVia`; `null` = primária). Grupos sem cobertura ⇒ `skipped_no_coverage`.
 - **Automação multi-chip** (`automation.mjs`): os handlers `onMessage`/`onMembership` recebem `account_id`+`msg_id` e fazem **dedup** por (grupo, msg-id/evento) — N chips no mesmo grupo disparam a regra **1×**. O "chip que responde" é o menor chip **conectado** membro do grupo (`responderFor`); `remove` usa o menor chip **admin** (`adminResponderFor`). Trava: admin nunca é removido por gatilho.
 - **Webhook** (`webhooks.mjs`): `POST` JSON assinado com HMAC-SHA256 (header `x-isi-signature`), retry com backoff. Payload inclui `chip{account_id,label}`, `group{jid,name}`, `lead{name,phone,jid}`, `message`, `date`/`time`. O telefone do lead vem de `participant.phoneNumber` nos eventos join/leave (Baileys 7 usa `@lid` para participantes — ver gotcha).

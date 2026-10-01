@@ -199,7 +199,12 @@ function ChipCard({
     setSyncMsg("");
     try {
       const r = await syncAccount(account.id);
-      setSyncMsg(r.error ? r.message ?? "falha" : `${r.synced ?? 0} grupos (${r.admin ?? 0} admin)`);
+      setSyncMsg(
+        r.error
+          ? r.message ?? "falha"
+          : `${r.synced ?? 0} grupos (${r.admin ?? 0} admin)` +
+              (r.pruned ? ` · ${r.pruned} removido(s)` : "")
+      );
     } catch {
       setSyncMsg("falha ao sincronizar");
     } finally {

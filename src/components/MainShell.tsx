@@ -137,7 +137,8 @@ export function MainShell({ license, onLicenseChange }: Props) {
       </aside>
 
       <main className="content">
-        <ApprovalsBar />
+        {/* Aprovações só existem via ponte MCP, que é Pro. */}
+        {isPro && <ApprovalsBar />}
         {view === "overview" && (
           <Overview license={license} onGo={setView} privacidade={privacidade} setPrivacidade={setPrivacidade} />
         )}
@@ -149,8 +150,8 @@ export function MainShell({ license, onLicenseChange }: Props) {
         {view === "automation" && <AutomationView isPro={isPro} />}
         {view === "bulk" && <BulkActionsView />}
         {view === "agents" && <AgentsView isPro={isPro} />}
-        {view === "plans" && <PlansView />}
-        {view === "export" && <ExportView />}
+        {view === "plans" && <PlansView isPro={isPro} />}
+        {view === "export" && <ExportView isPro={isPro} />}
         {view === "faq" && <FaqView isPro={isPro} />}
         {view === "support" && <SupportView />}
       </main>

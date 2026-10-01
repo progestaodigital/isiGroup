@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ExportResult, ExportSection, ExportSummary, getExportSummary, runExport } from "../lib/api";
+import { ProLock } from "./ProLock";
 
 // Ordem e textos das seções. O rótulo explica o que entra, porque "bulk" ou
 // "selections" não dizem nada para quem só usa o app.
@@ -47,7 +48,7 @@ const ROTULO_ACAO: Record<string, string> = {
   account_settings: "chip",
 };
 
-export function ExportView() {
+export function ExportView({ isPro }: { isPro: boolean }) {
   const [resumo, setResumo] = useState<ExportSummary | null>(null);
   const [marcadas, setMarcadas] = useState<Set<ExportSection>>(new Set());
   const [comSegredos, setComSegredos] = useState(false);
@@ -56,6 +57,7 @@ export function ExportView() {
   const [err, setErr] = useState<string | null>(null);
 
   const carregar = useCallback(() => {
+    if (!isPro) return;
     getExportSummary()
       .then((r) => {
         setResumo(r);
@@ -63,7 +65,7 @@ export function ExportView() {
         setMarcadas(new Set(r.available.filter((s) => (r.sections[s] ?? 0) > 0)));
       })
       .catch(() => {});
-  }, []);
+  }, [isPro]);
 
   useEffect(carregar, [carregar]);
 
@@ -91,6 +93,15 @@ export function ExportView() {
   }
 
   const total = resumo ? [...marcadas].reduce((a, s) => a + (resumo.sections[s] ?? 0), 0) : 0;
+
+  if (!isPro) {
+    return (
+      <ProLock
+        title="Exportar configuração"
+        subtitle="Leve agendamentos, automações, agentes e seleções para outro computador."
+      />
+    );
+  }
 
   return (
     <div>
