@@ -30,7 +30,11 @@ for (const f of ['index.mjs', 'mcp.mjs', 'package.json']) {
   cpSync(join(sidecarSrc, f), join(sidecarDst, f));
 }
 for (const d of ['src', 'migrations']) {
-  cpSync(join(sidecarSrc, d), join(sidecarDst, d), { recursive: true });
+  cpSync(join(sidecarSrc, d), join(sidecarDst, d), {
+    recursive: true,
+    // Testes nao entram no bundle — rodam no repo com `node --test`.
+    filter: (p) => !p.endsWith('.test.mjs'),
+  });
 }
 
 // 2b) Sincroniza a versão do sidecar com a do app (o /health reporta esta

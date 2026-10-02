@@ -534,6 +534,47 @@ select option:disabled { color: rgba(26, 26, 26, 0.45); }
 .delay-row { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 4px; }
 .delay-row input[type="number"] { width: 72px; background: var(--input-bg); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); padding: 9px 11px; font-family: inherit; }
 
+/* --- Keymaker: variacao de mensagem, rodizio de midia, opcoes --- */
+.keymaker { display: flex; flex-direction: column; gap: 5px; }
+.keymaker-bar { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 12px; }
+.keymaker-bar .sep { color: var(--muted); opacity: 0.5; }
+.mini-select {
+  background: var(--input-bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--muted); padding: 3px 6px; font-size: 11px; font-family: var(--mono);
+}
+.keymaker-samples {
+  display: flex; flex-direction: column; gap: 6px;
+  border: 1px dashed var(--border); border-radius: var(--radius-sm);
+  padding: 9px 11px; background: var(--input-bg);
+}
+.keymaker-samples .sample { display: flex; gap: 9px; align-items: flex-start; font-size: 13px; }
+.keymaker-samples .sample-n {
+  font-family: var(--mono); font-size: 10px; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; flex: none; margin-top: 1px;
+}
+.keymaker-samples .sample-t { white-space: pre-wrap; word-break: break-word; }
+.warn-text { color: var(--warn, #d9a33a); }
+.err-text { color: var(--err, #e0575b); }
+
+.media-list { display: flex; flex-direction: column; gap: 5px; }
+.media-item {
+  display: flex; align-items: center; gap: 9px; font-size: 13px;
+  background: var(--input-bg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 6px 10px;
+}
+.media-item .media-n {
+  font-family: var(--mono); font-size: 10px; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; flex: none;
+}
+.media-item .media-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.opt-tabs { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 4px; }
+.opt-tabs > button:not(.link) {
+  background: var(--input-bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--muted); padding: 6px 11px; font-size: 12px; font-family: inherit; cursor: pointer;
+}
+.opt-tabs > button:not(.link).on { color: var(--text); border-color: var(--accent, var(--text)); }
+
 /* --- Animacoes --- */
 @keyframes pulse {
   0%, 100% { opacity: 1; }

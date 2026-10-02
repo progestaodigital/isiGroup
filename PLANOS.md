@@ -22,6 +22,14 @@ construção — o executor delega para as filas existentes (bulk/scheduler/regr
 | Formato | Quando usar |
 | --- | --- |
 | `.isiplan` / `.zip` | **Canônico.** `plan.json` na raiz + pasta `media/` com imagens/áudios/vídeos referenciados. |
+
+> **Keymaker no plano (Pro).** Qualquer texto ou legenda aceita variações entre chaves
+> (`{{oi|olá|opa}}`, com `{{grupo}}`/`{{chip}}`/`{{saudacao}}`/`{{data}}`/`{{hora}}` e,
+> em automação, `{{nome}}`/`{{primeiro_nome}}`). `"medias": [ref, ref]` no lugar de
+> `"media"` ativa o rodízio de mídia (máx. 10), e `"options": [{steps}, {steps}]` no
+> lugar de `"steps"` cria um **recorrente variável** (uma opção por disparo; exige
+> `kind: "recurring"` e aceita `"variant_mode": "random" | "sequential"`). Bloco sem
+> fechar é recusado na importação. Detalhes: **`KEYMAKER.md`**.
 | `.json` solto | Plano sem mídia (ou só imagens pequenas inline em base64, ≤ 2 MB). |
 
 Limites: 50 ações por plano · `plan.json` ≤ 10 MB · pacote ≤ 200 MB.
@@ -43,8 +51,9 @@ Limites: 50 ações por plano · `plan.json` ≤ 10 MB · pacote ≤ 200 MB.
     { "type": "schedule",
       "params": { "targets": { "ref": "turmas" }, "kind": "recurring",
                   "recur_dow": 1, "recur_time": "09:00",
-                  "steps": [ { "type": "text", "text": "Bom dia! Agenda da semana 👇" },
-                             { "type": "audio", "media": { "file": "media/bomdia.mp3" } } ] } },
+                  "steps": [ { "type": "text", "text": "{{Bom dia|Oi}}! Agenda da semana 👇" },
+                             { "type": "audio", "medias": [ { "file": "media/bomdia.mp3" },
+                                                            { "file": "media/bomdia2.mp3" } ] } ] } },
     { "type": "automation_rule",
       "params": { "name": "Boas-vindas", "trigger_type": "join", "scope": { "ref": "turmas" },
                   "actions": [ { "type": "dm", "steps": [ { "type": "text", "text": "Bem-vindo!" } ] } ] } }

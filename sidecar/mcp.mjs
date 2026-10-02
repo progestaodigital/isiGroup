@@ -160,6 +160,13 @@ const GROUPS_SCHEMA = {
   },
 };
 
+// Variacao de mensagem (Keymaker) — vale para qualquer campo de texto abaixo.
+const SPINTAX_DOC =
+  'Aceita variações entre chaves separadas por pipe: "{{oi|olá|opa}}" sorteia uma por grupo ' +
+  '(as combinações multiplicam a cada bloco). Variáveis de contexto usam a mesma sintaxe: ' +
+  '{{grupo}}, {{chip}}, {{saudacao}}, {{data}}, {{hora}} (em automação, também {{nome}} e ' +
+  '{{primeiro_nome}}). Chaves sem pipe saem literais. Recurso Pro.';
+
 const STEPS_SCHEMA = {
   type: 'array',
   description: 'Passos da mensagem, em ordem',
@@ -167,8 +174,14 @@ const STEPS_SCHEMA = {
     type: 'object',
     properties: {
       type: { type: 'string', enum: ['text', 'image', 'audio', 'video', 'poll'] },
-      text: { type: 'string', description: 'texto da mensagem ou legenda (image/video)' },
+      text: { type: 'string', description: `texto da mensagem ou legenda (image/video). ${SPINTAX_DOC}` },
       media: { type: 'object', description: 'objeto retornado por upload_media (image/audio/video)' },
+      medias: {
+        type: 'array',
+        items: { type: 'object' },
+        description:
+          'rodízio de mídia (Pro): até 10 objetos de upload_media; o app alterna entre eles, um sorteio por grupo. Use no lugar de "media"',
+      },
       poll: {
         type: 'object',
         properties: {
@@ -455,11 +468,22 @@ const TOOLS = [
           description: 'recurring, opcional: "odd" = só semanas ímpares, "even" = só pares. Omitir = todas as semanas. Semana ISO-8601 (igual ao Google Agenda)',
         },
         steps: STEPS_SCHEMA,
+        options: {
+          type: 'array',
+          items: { type: 'object', properties: { steps: STEPS_SCHEMA }, required: ['steps'] },
+          description:
+            'recorrente variável (Pro): várias opções de mensagem para o mesmo dia/horário. O app escolhe UMA por disparo e uma diferente no disparo seguinte. Exige kind "recurring"; use no lugar de "steps"',
+        },
+        variant_mode: {
+          type: 'string',
+          enum: ['random', 'sequential'],
+          description: 'com options: "random" (padrão, sorteia sem repetir) ou "sequential" (opção 1, 2, 3… em ordem)',
+        },
         step_min_s: { type: 'number' },
         step_max_s: { type: 'number' },
         chips: { type: 'array', items: { type: 'string' }, description: 'pool de rótulos de chips (Pro)' },
       },
-      required: ['targets', 'kind', 'steps'],
+      required: ['targets', 'kind'],
     },
     handler: async (a) =>
       runPlanAction('create_schedule', 'MCP: agendar mensagem', {
@@ -473,6 +497,8 @@ const TOOLS = [
           recur_time: a.recur_time,
           recur_week_parity: a.recur_week_parity,
           steps: a.steps,
+          options: a.options,
+          variant_mode: a.variant_mode,
           step_min_s: a.step_min_s,
           step_max_s: a.step_max_s,
           chips: a.chips,

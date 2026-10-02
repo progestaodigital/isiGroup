@@ -77,6 +77,20 @@ export function createExporter(db) {
     return { file: `media/${nome}` };
   }
 
+  // Midias de um passo (rodizio): tabela filha, com fallback para a coluna
+  // legada. Sem isso, exportar/importar descartaria as variacoes em silencio.
+  function caminhosDoPasso(s) {
+    if (s.id != null) {
+      const rows = db
+        .prepare('SELECT path FROM schedule_step_media WHERE step_id = ? ORDER BY order_index, id')
+        .all(s.id);
+      if (rows.length) return rows.map((r) => r.path);
+    }
+    if (Array.isArray(s.medias) && s.medias.length) return s.medias.map((m) => m.stored_path);
+    const unico = s.media_path ?? s.media?.stored_path ?? null;
+    return unico ? [unico] : [];
+  }
+
   // Passo de conteudo (agendamento / acao de regra) no formato do plano.
   function passo(s, midias) {
     const tipo = s.payload_type ?? 'text';
@@ -86,9 +100,10 @@ export function createExporter(db) {
       const texto = String(corpo.text ?? s.text ?? '').trim();
       return texto ? { type: 'text', text: texto } : null;
     }
-    const media = refMidia(s.media_path, midias);
-    if (!media) return null;
-    const p = { type: tipo, media };
+    const refs = caminhosDoPasso(s).map((c) => refMidia(c, midias)).filter(Boolean);
+    if (refs.length === 0) return null;
+    // Uma midia sai como `media` (formato antigo); varias, como `medias`.
+    const p = refs.length > 1 ? { type: tipo, medias: refs } : { type: tipo, media: refs[0] };
     // Audio vira nota de voz e nao aceita legenda.
     if (tipo !== 'audio' && corpo.caption) p.text = String(corpo.caption);
     return p;
@@ -122,34 +137,57 @@ export function createExporter(db) {
       if (jids.length === 0) continue;
 
       const passos = db
-        .prepare('SELECT * FROM schedule_steps WHERE schedule_id = ? ORDER BY order_index')
-        .all(s.id)
-        .map((p) => passo(p, midias))
-        .filter(Boolean);
+        .prepare(
+          `SELECT * FROM schedule_steps WHERE schedule_id = ?
+            ORDER BY COALESCE(option_index, 0), order_index`
+        )
+        .all(s.id);
+
+      // Passos agrupados por OPCAO (recorrente variavel). Sem agrupar, as
+      // opcoes viriam concatenadas numa sequencia unica na reimportacao.
+      const porOpcao = new Map();
+      for (const p of passos) {
+        const oi = p.option_index ?? 0;
+        const conv = passo(p, midias);
+        if (!conv) continue;
+        if (!porOpcao.has(oi)) porOpcao.set(oi, []);
+        porOpcao.get(oi).push(conv);
+      }
+      let opcoes = [...porOpcao.keys()].sort((a, b) => a - b).map((k) => porOpcao.get(k));
 
       // Agendamento legado (sem schedule_steps): reconstroi 1 passo a partir
       // de default_json + media_assets.
-      if (passos.length === 0) {
+      if (opcoes.length === 0) {
         const corpo = safeObj(s.default_json);
-        if (s.payload_type === 'poll' && corpo.poll) passos.push({ type: 'poll', poll: corpo.poll });
+        const unica = [];
+        if (s.payload_type === 'poll' && corpo.poll) unica.push({ type: 'poll', poll: corpo.poll });
         else if (['image', 'video', 'audio'].includes(s.payload_type)) {
-          const a = db.prepare('SELECT path FROM media_assets WHERE schedule_id = ? LIMIT 1').get(s.id);
-          const media = refMidia(a?.path, midias);
-          if (media) {
-            const p = { type: s.payload_type, media };
+          const refs = db
+            .prepare('SELECT path FROM media_assets WHERE schedule_id = ? ORDER BY COALESCE(order_index, 0), id')
+            .all(s.id)
+            .map((a) => refMidia(a.path, midias))
+            .filter(Boolean);
+          if (refs.length) {
+            const p = refs.length > 1 ? { type: s.payload_type, medias: refs } : { type: s.payload_type, media: refs[0] };
             if (s.payload_type !== 'audio' && corpo.text) p.text = String(corpo.text);
-            passos.push(p);
+            unica.push(p);
           }
-        } else if (corpo.text) passos.push({ type: 'text', text: String(corpo.text) });
+        } else if (corpo.text) unica.push({ type: 'text', text: String(corpo.text) });
+        if (unica.length) opcoes = [unica];
       }
-      if (passos.length === 0) continue;
+      if (opcoes.length === 0) continue;
 
       const params = {
         targets: seletor(jids, nomes, perdidos),
         kind: s.kind === 'recurring' ? 'recurring' : 'once',
         name: s.name ?? undefined,
-        steps: passos,
+        steps: opcoes[0],
       };
+      // Mais de uma opcao: exporta como recorrente variavel.
+      if (opcoes.length > 1) {
+        params.options = opcoes.map((steps) => ({ steps }));
+        params.variant_mode = s.variant_mode === 'sequential' ? 'sequential' : 'random';
+      }
       if (params.kind === 'once') {
         params.scheduled_at = s.scheduled_at;
       } else {
@@ -212,6 +250,7 @@ export function createExporter(db) {
     payload_type: s.type ?? s.payload_type ?? 'text',
     body_json: JSON.stringify({ text: s.text, caption: s.text, poll: s.poll }),
     media_path: s.media?.stored_path ?? s.media_path ?? null,
+    medias: Array.isArray(s.medias) && s.medias.length ? s.medias : undefined,
     text: s.text,
   });
 

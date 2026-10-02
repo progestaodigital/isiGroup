@@ -555,7 +555,10 @@ export function createPlans(db, wa, bulk, { mediaDir, appVersion, editionState }
       content_mode: params.content_mode === 'per_target' ? 'per_target' : 'broadcast',
       payload_type: 'text',
       default_text: params.content_mode === 'per_target' ? '' : undefined,
-      steps: params.content_mode === 'per_target' ? undefined : params.steps,
+      // `options` cobre a opcao unica tambem (lista de uma), entao o motor
+      // recebe sempre a mesma forma.
+      options: params.content_mode === 'per_target' ? undefined : params.options,
+      variant_mode: params.variant_mode,
       step_min_s: params.step_min_s,
       step_max_s: params.step_max_s,
       account_ids: pool.ids ?? undefined,
@@ -923,12 +926,35 @@ export function createPlans(db, wa, bulk, { mediaDir, appVersion, editionState }
             params.content_mode = 'per_target';
             params.messages = p.messages;
           } else {
-            if (!Array.isArray(p.steps) || p.steps.length === 0) return fail(`${where}: informe steps (ao menos uma mensagem)`);
-            params.steps = [];
-            for (const [si, rs] of p.steps.entries()) {
-              params.steps.push(await normalizeContentStep(rs, `${where}, passo ${si + 1}`, stageMedia));
+            // `options` = recorrente variavel (o motor escolhe UMA por
+            // disparo); `steps` = uma opcao so. As duas formas viram options.
+            const listas = Array.isArray(p.options) && p.options.length
+              ? p.options.map((o) => (Array.isArray(o) ? o : o?.steps))
+              : [p.steps];
+            if (listas.length > 1 && kind !== 'recurring') {
+              return fail(`${where}: options (recorrente variável) exige kind "recurring"`);
             }
-            if (params.steps.length > 1) {
+            if (listas.length > 1 && editionState.edition !== 'pro') {
+              warnings.push(`${where}: recorrente variável é recurso Pro — o passo vai falhar na edição atual`);
+            }
+            params.options = [];
+            for (const [oi, lista] of listas.entries()) {
+              if (!Array.isArray(lista) || lista.length === 0) {
+                const qual = listas.length > 1 ? `opção ${oi + 1}` : 'steps';
+                return fail(`${where}: informe ${qual} (ao menos uma mensagem)`);
+              }
+              const passos = [];
+              const ow = listas.length > 1 ? `${where}, opção ${oi + 1}` : where;
+              for (const [si, rs] of lista.entries()) {
+                passos.push(await normalizeContentStep(rs, `${ow}, passo ${si + 1}`, stageMedia));
+              }
+              params.options.push(passos);
+            }
+            params.steps = params.options[0]; // compatibilidade do formato antigo
+            if (listas.length > 1) {
+              params.variant_mode = p.variant_mode === 'sequential' ? 'sequential' : 'random';
+            }
+            if (params.options.some((o) => o.length > 1)) {
               params.step_min_s = Number.isInteger(p.step_min_s) && p.step_min_s >= 0 ? p.step_min_s : 5;
               params.step_max_s = Number.isInteger(p.step_max_s) && p.step_max_s >= params.step_min_s ? p.step_max_s : params.step_min_s;
             }
@@ -1118,8 +1144,16 @@ export function createPlans(db, wa, bulk, { mediaDir, appVersion, editionState }
         ? Math.min(rs.poll.selectableCount, values.length) : 1;
       return { type, poll: { name: String(rs.poll.name).trim(), values, selectableCount } };
     }
-    const media = await stageMedia(rs.media, [type], where);
-    const step = { type, media };
+    // Midia: `medias[]` (rodizio — o motor alterna entre elas no disparo) ou
+    // `media` (uma so). As duas formas convivem; `media` segue preenchido com
+    // a primeira para quem le o formato antigo.
+    const refs = Array.isArray(rs.medias) && rs.medias.length ? rs.medias : [rs.media];
+    if (refs.length > 10) throw new Error(`${where}: máximo de 10 mídias por mensagem`);
+    const medias = [];
+    for (const [i, ref] of refs.entries()) {
+      medias.push(await stageMedia(ref, [type], refs.length > 1 ? `${where}, mídia ${i + 1}` : where));
+    }
+    const step = { type, media: medias[0], medias };
     if (type !== 'audio' && typeof rs.text === 'string') step.text = rs.text;
     return step;
   }
@@ -1243,9 +1277,16 @@ export function createPlans(db, wa, bulk, { mediaDir, appVersion, editionState }
         const when = p.kind === 'recurring'
           ? `${semana ? `${DOW[p.recur_dow]}${semana}` : `toda ${DOW[p.recur_dow]}`} às ${p.recur_time}`
           : `em ${new Date(p.scheduled_at).toLocaleString('pt-BR')}`;
+        const opts = p.options ?? (p.steps ? [p.steps] : []);
+        const descOpt = (passos) =>
+          `${passos.length} passo(s): ${passos
+            .map((s) => s.type + ((s.medias?.length ?? 0) > 1 ? ` (${s.medias.length} mídias)` : ''))
+            .join(' → ')}`;
         const content = p.content_mode === 'per_target'
           ? 'mensagem por grupo'
-          : `${p.steps.length} passo(s): ${p.steps.map((s) => s.type).join(' → ')}`;
+          : opts.length > 1
+            ? `${opts.length} opções, uma por disparo — ${opts.map(descOpt).join(' | ')}`
+            : descOpt(opts[0] ?? []);
         return `Agendar ${when} → ${selDesc(p.targets)} (${content})${p.chips ? ` · chips: ${p.chips.join(', ')}` : ''}`;
       }
       case 'automation_rule': {
@@ -1381,7 +1422,8 @@ export function schemaDoc() {
       match: '{"match": "Turma *"} — padrão glob (* e ?) sobre os nomes; zero resultados = passo pulado com aviso',
     },
     chips: 'Chips (contas WhatsApp) são endereçados por rótulo: "chip": "auto" (padrão) ou {"label": "Chip vendas"}. Agendamentos aceitam "chips": ["A","B"] (pool multi-chip, recurso Pro).',
-    media: 'Referências de mídia: {"file": "media/arquivo.ext"} (dentro do pacote) ou {"base64": "...", "mime": "image/png", "name": "x.png"} (só imagem). Áudio é transcodificado para nota de voz (PTT) automaticamente.',
+    media: 'Referências de mídia: {"file": "media/arquivo.ext"} (dentro do pacote) ou {"base64": "...", "mime": "image/png", "name": "x.png"} (só imagem). Áudio é transcodificado para nota de voz (PTT) automaticamente. Para rodízio, use "medias": [ref, ref, …] (máx. 10) no lugar de "media": o app alterna entre os arquivos, um sorteio por grupo.',
+    variacao: 'Keymaker (Pro): qualquer texto ou legenda aceita variações entre chaves, separadas por pipe — "{{oi|olá|opa}}" sorteia uma por grupo, e as combinações multiplicam a cada bloco. Variáveis de contexto usam a mesma sintaxe: {{grupo}}, {{chip}}, {{saudacao}}, {{data}}, {{hora}} (em automação, também {{nome}} e {{primeiro_nome}}). Chaves sem pipe saem literais; bloco sem fechar é recusado na importação.',
     actions: {
       create_groups: {
         params: { name: 'com {x} = número sequencial', quantity: '1–30', start: 'primeiro número', description: 'opcional', image: 'mídia opcional', admins: '["55DDDNÚMERO"] promovidos após criar', members: '["55DDDNÚMERO"]', chip: '"auto" | {"label": "..."}', pace: 'slow|normal|fast' },
@@ -1398,7 +1440,9 @@ export function schemaDoc() {
           scheduled_at: 'once: ISO 8601 com fuso (ex: 2026-10-01T09:00:00-03:00)',
           recur_dow: 'recurring: 0 (domingo) a 6 (sábado)', recur_time: 'recurring: "HH:MM" (hora local do app)',
           recur_week_parity: 'recurring, opcional: "odd" (só semanas ímpares) | "even" (só pares). Ausente = todas as semanas. Semana = ISO-8601, igual ao Google Agenda',
-          steps: '[{type: "text", text}, {type: "image|video", media, text?}, {type: "audio", media}, {type: "poll", poll: {name, values, selectableCount}}]',
+          steps: '[{type: "text", text}, {type: "image|video", media|medias, text?}, {type: "audio", media|medias}, {type: "poll", poll: {name, values, selectableCount}}]',
+          options: 'recurring + Pro, opcional: [{steps: [...]}, {steps: [...]}] — várias opções de mensagem para o mesmo dia/horário; o app escolhe UMA por disparo e uma diferente no disparo seguinte (recorrente variável). Use no lugar de "steps"',
+          variant_mode: 'com options, opcional: "random" (padrão, sorteia sem repetir) | "sequential" (opção 1, 2, 3… em ordem)',
           step_min_s: 'intervalo entre passos (s)', step_max_s: 'intervalo máx (s)',
           chips: 'opcional, pool de rótulos (Pro)',
           content_mode: 'opcional "per_target" + messages: {"nome do grupo": "texto"}',

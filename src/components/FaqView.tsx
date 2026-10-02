@@ -168,6 +168,59 @@ function buildFaq(isPro: boolean): { group: string; items: QA[] }[] {
       ...(isPro
         ? [
             {
+              q: "Como criar várias versões de uma mensagem (Keymaker)?",
+              a: (
+                <>
+                  Escreva as variações entre chaves, separadas por barra vertical:{" "}
+                  <code>{"{{oi, tudo bem?|olá, como vai?|opa!}}"}</code>. Cada grupo recebe uma, sorteada{" "}
+                  <b>sem repetir</b> enquanto houver combinação nova. Cada bloco novo multiplica: 3 variações
+                  numa linha e 4 em outra dão <b>12 combinações</b>. O contador embaixo do campo mostra o total
+                  e o botão <i>ver exemplos</i> sorteia alguns para você conferir.
+                  <br />
+                  <br />
+                  A mesma sintaxe traz dados do contexto: <code>{"{{grupo}}"}</code>,{" "}
+                  <code>{"{{chip}}"}</code>, <code>{"{{saudacao}}"}</code> (bom dia/boa tarde/boa noite),{" "}
+                  <code>{"{{data}}"}</code> e <code>{"{{hora}}"}</code>. Em automações existem também{" "}
+                  <code>{"{{nome}}"}</code> e <code>{"{{primeiro_nome}}"}</code> de quem entrou ou escreveu.
+                  <br />
+                  <br />
+                  Chaves <b>sem</b> barra saem como você escreveu (<code>{"{{R$ 100}}"}</code> sai literal), e
+                  texto sem chave nenhuma não é alterado. Isso é variação de <b>texto</b>, para a mensagem não
+                  ficar repetitiva — não é truque para escapar de detecção.
+                </>
+              ),
+            },
+            {
+              q: "Posso colocar várias imagens e o app alternar entre elas?",
+              a: (
+                <>
+                  Sim. No passo de imagem, áudio ou vídeo, envie <b>até 10 arquivos</b> (pode selecionar vários
+                  de uma vez). Cada grupo recebe um, em <b>rodízio</b> sem repetir. Legenda e arquivo são
+                  sorteados de forma independente, então 2 legendas × 4 imagens dão <b>8 combinações</b>.
+                  <br />
+                  <br />
+                  Se um arquivo for apagado do computador, o app usa outro da lista em vez de falhar o envio.
+                </>
+              ),
+            },
+            {
+              q: "O que é o recorrente variável?",
+              a: (
+                <>
+                  É um agendamento semanal com <b>várias opções de mensagem</b> para o mesmo dia e horário. A
+                  cada disparo o app escolhe uma, e no disparo seguinte escolhe uma <b>diferente</b> — todas
+                  aparecem antes de qualquer repetição. Cada opção é uma sequência completa: formatos, mídias e
+                  variações de texto.
+                  <br />
+                  <br />
+                  Na tela, as <b>abas de opção</b> ficam acima das mensagens, e o botão <i>duplicar</i> cria uma
+                  cópia para você só ajustar o que muda. Os grupos e os chips valem para o agendamento todo, não
+                  por opção. Se o app cair no meio de um disparo, ao voltar ele continua com a <b>mesma</b> opção
+                  — ninguém recebe mensagem pela metade.
+                </>
+              ),
+            },
+            {
               q: "Como funcionam vários chips (multi-chip)?",
               a: (
                 <>

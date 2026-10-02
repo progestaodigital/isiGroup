@@ -20,6 +20,12 @@ import { createAi } from './src/ai/agents.mjs';
 import { setUploadsDir } from './src/ai/net-guard.mjs';
 import { createResponder } from './src/ai/responder.mjs';
 import { createExporter, SECOES } from './src/exporter.mjs';
+import {
+  validate as spinValidate,
+  samples as spinSamples,
+  VARS_AUTOMATION,
+  VARS_BROADCAST,
+} from './src/spin.mjs';
 import { zipSync } from 'fflate';
 import { homedir } from 'node:os';
 
@@ -60,13 +66,15 @@ const downloads = join(homedir(), 'Downloads');
 const exportDir = existsSync(downloads) ? join(downloads, 'isigroup') : join(dataDir, 'exports');
 const wa = createWhatsApp(db, sessionDir);
 
-// Worker do agendador: re-hidrata a fila e dispara no horario.
-const scheduler = createScheduler(db, wa);
-scheduler.start();
-
 // Edicao da licenca (free/pro), definida pelo front apos validar a licenca.
 // Default free = trava nao-admin ate o front confirmar Pro.
+// Declarada ANTES do scheduler porque ele guarda a referencia (o Keymaker e o
+// recorrente variavel sao gated no motor, nao so na UI).
 const editionState = { edition: 'free' };
+
+// Worker do agendador: re-hidrata a fila e dispara no horario.
+const scheduler = createScheduler(db, wa, editionState);
+scheduler.start();
 
 // Automacoes & gatilhos: mensagem + entrada/saida de membros.
 const automation = createAutomation(db, wa, editionState);
@@ -185,11 +193,39 @@ async function route(req, res, url) {
     path === '/integration' ||
     path.startsWith('/integration/') ||
     path === '/export' ||
-    path.startsWith('/export/');
+    path.startsWith('/export/') ||
+    path.startsWith('/spin');
   if (proOnly && editionState.edition !== 'pro') {
     return json(res, 403, {
       error: 'pro_required',
-      message: 'Agentes de IA, Planos & IA e Exportar sao exclusivos do plano Pro.',
+      message: 'Agentes de IA, Planos & IA, Exportar e Keymaker sao exclusivos do plano Pro.',
+    });
+  }
+
+  // --- Keymaker: contagem de combinacoes + amostras (preview da UI) ---
+  // Mesma rota serve a ponte MCP, que pode querer conferir um texto antes de
+  // criar o agendamento.
+  if (match('POST', '/spin/preview')) {
+    const b = await readJson(req);
+    const text = String(b?.text ?? '');
+    const automacao = b?.scope === 'automation';
+    const available = automacao ? VARS_AUTOMATION : VARS_BROADCAST;
+    const v = spinValidate(text, { available });
+    const n = Number.isInteger(b?.n) && b.n > 0 ? Math.min(b.n, 5) : 3;
+    // Contexto de exemplo: as variaveis precisam mostrar algo no preview.
+    const ctx = {
+      grupo: 'Nome do Grupo',
+      nome: automacao ? 'Maria Silva' : '',
+      chip: 'Chip 1',
+      now: new Date(),
+    };
+    return json(res, 200, {
+      ok: v.ok,
+      total: v.total,
+      errors: v.errors,
+      warnings: v.warnings,
+      variables: available,
+      samples: v.ok ? spinSamples(text, n, ctx) : [],
     });
   }
 
@@ -788,6 +824,7 @@ function parseScheduleInput(body) {
     kind: rawKind, recur_dow, recur_time, recur_week_parity,
     payload_type: rawType, media, poll,
     messages, steps: rawSteps, step_min_s, step_max_s, account_ids,
+    options: rawOptions, variant_mode: rawVariantMode,
   } = body ?? {};
 
   // Pool de chips selecionado (multi-chip) — o scheduler rotaciona por execucao.
@@ -819,33 +856,65 @@ function parseScheduleInput(body) {
 
   let payloadType = 'text';
   let defaultJson;
-  let richSteps = null; // passos multi-formato (broadcast)
+  let richSteps = null; // passos da opcao 0 (compatibilidade)
+  let optionSteps = null; // [[passo…], [passo…]] — opcoes do recorrente variavel
   let legacyTextSteps = null; // [string] (broadcast texto legado)
+  let legacyMedias = []; // midias do caminho legado (midia unica -> N variacoes)
   let stepMin = null;
   let stepMax = null;
+
+  // Opcoes de mensagem (recorrente variavel). `steps` = uma opcao; `options` =
+  // varias. Normaliza as duas formas para a mesma estrutura.
+  const optionBodies = Array.isArray(rawOptions) && rawOptions.length
+    ? rawOptions.map((o) => (Array.isArray(o) ? o : o?.steps))
+    : Array.isArray(rawSteps) && rawSteps.length
+      ? [rawSteps]
+      : null;
 
   if (mode === 'per_target') {
     // Mensagem especifica por grupo (somente texto, mensagem unica).
     payloadType = 'text';
+    const e = spinError(String(default_text ?? ''), 'mensagem');
+    if (e) return { error: e };
     defaultJson = JSON.stringify({ text: String(default_text ?? '') });
-  } else if (Array.isArray(rawSteps) && rawSteps.length > 0) {
+  } else if (optionBodies) {
     // SEQUENCIA MULTI-FORMATO: cada passo tem seu proprio tipo + conteudo.
-    const normalized = [];
-    for (const rs of rawSteps) {
-      const n = normalizeStep(rs);
-      if (n.error) return { error: n.error };
-      normalized.push(n);
+    // Com mais de uma opcao, cada uma e uma sequencia completa e o motor
+    // escolhe UMA por disparo (recorrente variavel).
+    const opts = [];
+    for (const list of optionBodies) {
+      if (!Array.isArray(list) || list.length === 0) {
+        return { error: 'uma das opcoes de mensagem esta vazia' };
+      }
+      const normalized = [];
+      for (const rs of list) {
+        const n = normalizeStep(rs);
+        if (n.error) return { error: n.error };
+        normalized.push(n);
+      }
+      opts.push(normalized);
     }
-    richSteps = normalized;
-    payloadType = normalized.length > 1 ? 'sequence' : normalized[0].payload_type;
-    defaultJson = normalized[0].body_json;
-    if (normalized.length > 1) {
+    if (opts.length > 1 && kind !== 'recurring') {
+      return { error: 'varias opcoes de mensagem valem so para o agendamento recorrente' };
+    }
+    optionSteps = opts;
+    richSteps = opts[0];
+    // O tipo/corpo do agendamento espelha a opcao 1 (o que a lista exibe).
+    payloadType = richSteps.length > 1 ? 'sequence' : richSteps[0].payload_type;
+    defaultJson = richSteps[0].body_json;
+    // A janela entre passos vale para qualquer opcao com 2+ passos.
+    if (opts.some((o) => o.length > 1)) {
       stepMin = Number.isInteger(step_min_s) && step_min_s >= 0 ? step_min_s : 5;
       stepMax = Number.isInteger(step_max_s) && step_max_s >= stepMin ? step_max_s : stepMin;
     }
   } else {
     // Caminho legado (broadcast unico ou sequencia de texto via `messages`).
+    // Aqui tambem aceita N midias (rodizio) via `medias[]`.
     payloadType = ['text', 'audio', 'video', 'image', 'poll'].includes(rawType) ? rawType : 'text';
+    legacyMedias = stepMediaList(body);
+    if (legacyMedias.length > MAX_MEDIAS) {
+      return { error: `maximo de ${MAX_MEDIAS} midias por mensagem (recebidas ${legacyMedias.length})` };
+    }
     if (payloadType === 'text') {
       const msgs = Array.isArray(messages)
         ? messages.map((m) => String(m ?? '').trim()).filter(Boolean)
@@ -854,16 +923,20 @@ function parseScheduleInput(body) {
       if (msgs.length) legacyTextSteps = msgs;
       else if (single) legacyTextSteps = [single];
       else return { error: 'mensagem vazia' };
+      const e = legacyTextSteps.map((t, i) => spinError(t, `mensagem ${i + 1}`)).find(Boolean);
+      if (e) return { error: e };
       defaultJson = JSON.stringify({ text: legacyTextSteps[0] });
       if (legacyTextSteps.length > 1) {
         stepMin = Number.isInteger(step_min_s) && step_min_s >= 0 ? step_min_s : 5;
         stepMax = Number.isInteger(step_max_s) && step_max_s >= stepMin ? step_max_s : stepMin;
       }
     } else if (payloadType === 'video' || payloadType === 'image') {
-      if (!media?.stored_path) return { error: 'envie o arquivo' };
+      if (!legacyMedias.length) return { error: 'envie o arquivo' };
+      const e = spinError(String(default_text ?? ''), 'legenda');
+      if (e) return { error: e };
       defaultJson = JSON.stringify({ text: String(default_text ?? '') });
     } else if (payloadType === 'audio') {
-      if (!media?.stored_path) return { error: 'envie o audio' };
+      if (!legacyMedias.length) return { error: 'envie o audio' };
       defaultJson = JSON.stringify({});
     } else {
       const values = Array.isArray(poll?.values)
@@ -897,11 +970,18 @@ function parseScheduleInput(body) {
     }
   }
 
+  // Recorrente variavel: 2+ opcoes => rodizio. Uma opcao => 'single', e o
+  // agendamento se comporta exatamente como antes.
+  const variantCount = optionSteps ? optionSteps.length : 1;
+  const variantMode =
+    variantCount > 1 ? (rawVariantMode === 'sequential' ? 'sequential' : 'random') : 'single';
+
   return {
     name: name ?? null,
     kind, mode, payloadType, defaultJson,
-    richSteps, legacyTextSteps, stepMin, stepMax,
-    media, poolJson,
+    richSteps, optionSteps, legacyTextSteps, stepMin, stepMax,
+    variantMode, variantCount,
+    media, medias: legacyMedias, poolJson,
     scheduled_at: kind === 'once' ? new Date(scheduled_at).toISOString() : null,
     recur_dow: kind === 'recurring' ? recur_dow : null,
     recur_time: kind === 'recurring' ? recur_time : null,
@@ -926,9 +1006,13 @@ function ownMediaPath(path, scheduleId) {
       `SELECT 1 FROM schedule_steps WHERE media_path = ? AND schedule_id != ?
        UNION ALL
        SELECT 1 FROM media_assets  WHERE path       = ? AND schedule_id != ?
+       UNION ALL
+       SELECT 1 FROM schedule_step_media m
+         JOIN schedule_steps s ON s.id = m.step_id
+        WHERE m.path = ? AND s.schedule_id != ?
        LIMIT 1`
     )
-    .get(path, scheduleId, path, scheduleId);
+    .get(path, scheduleId, path, scheduleId, path, scheduleId);
   if (!usedByOther) return path;
 
   const copy = join(mediaDir, `${Date.now()}-${Math.floor(Math.random() * 1e6)}${extname(path)}`);
@@ -944,24 +1028,50 @@ function ownMediaPath(path, scheduleId) {
 
 // Insere os passos/midia/alvos de um agendamento (compartilhado por create/update).
 function writeScheduleRows(scheduleId, p) {
-  if (p.richSteps) {
-    // Passos multi-formato (autossuficientes).
+  if (p.optionSteps) {
+    // Passos multi-formato (autossuficientes), agrupados por OPCAO.
+    // option_index = a qual opcao o passo pertence (recorrente variavel);
+    // order_index = a ordem do passo DENTRO da opcao.
     const insStep = db.prepare(
       `INSERT INTO schedule_steps
-         (schedule_id, order_index, payload_type, body_json,
+         (schedule_id, order_index, option_index, payload_type, body_json,
           media_path, media_mimetype, media_kind, media_duration_seconds, media_waveform_json)
-       VALUES (?,?,?,?,?,?,?,?,?)`
+       VALUES (?,?,?,?,?,?,?,?,?,?)`
     );
-    p.richSteps.forEach((s, idx) =>
-      insStep.run(
-        scheduleId, idx, s.payload_type, s.body_json,
-        ownMediaPath(s.media?.stored_path ?? null, scheduleId),
-        s.media?.mimetype ?? null,
-        s.media?.kind ?? null,
-        s.media?.duration_seconds ?? null,
-        s.media?.waveform_json ?? null
-      )
+    const insMedia = db.prepare(
+      `INSERT INTO schedule_step_media
+         (step_id, order_index, path, mimetype, kind, duration_seconds, waveform_json)
+       VALUES (?,?,?,?,?,?,?)`
     );
+    p.optionSteps.forEach((steps, optIdx) => {
+      steps.forEach((s, idx) => {
+        // Cada arquivo passa pelo ownMediaPath: a copia-se-compartilhado vale
+        // por midia, nao por passo.
+        const medias = (s.medias ?? []).map((m) => ({
+          ...m,
+          stored_path: ownMediaPath(m.stored_path, scheduleId),
+        }));
+        const first = medias[0] ?? null;
+        // DUAL-WRITE: a midia 0 vai tambem para as colunas legadas do passo,
+        // para que uma versao anterior do app (rollback do auto-updater) ainda
+        // veja o agendamento com midia. Ver migration 019.
+        const r = insStep.run(
+          scheduleId, idx, optIdx, s.payload_type, s.body_json,
+          first?.stored_path ?? null,
+          first?.mimetype ?? null,
+          first?.kind ?? null,
+          first?.duration_seconds ?? null,
+          first?.waveform_json ?? null
+        );
+        medias.forEach((m, k) =>
+          insMedia.run(
+            r.lastInsertRowid, k, m.stored_path,
+            m.mimetype ?? null, m.kind ?? null,
+            m.duration_seconds ?? null, m.waveform_json ?? null
+          )
+        );
+      });
+    });
   } else if (p.legacyTextSteps) {
     // Sequencia de texto legada (coluna text).
     const insStep = db.prepare(
@@ -971,17 +1081,24 @@ function writeScheduleRows(scheduleId, p) {
       insStep.run(scheduleId, idx, 'text', JSON.stringify({ text: t }), t)
     );
   } else if (['audio', 'video', 'image'].includes(p.payloadType)) {
-    // Midia unica legada.
-    db.prepare(
-      `INSERT INTO media_assets (schedule_id, path, mimetype, kind, duration_seconds, waveform_json)
-       VALUES (?,?,?,?,?,?)`
-    ).run(
-      scheduleId,
-      ownMediaPath(p.media.stored_path, scheduleId),
-      p.media.mimetype ?? null,
-      p.media.kind ?? p.payloadType,
-      p.media.duration_seconds ?? null,
-      p.media.waveform_json ?? null
+    // Midia do caminho legado: a tabela ja aceitava N linhas por agendamento;
+    // agora elas sao as variacoes do rodizio (order_index, migration 019).
+    const ins = db.prepare(
+      `INSERT INTO media_assets
+         (schedule_id, path, mimetype, kind, duration_seconds, waveform_json, order_index)
+       VALUES (?,?,?,?,?,?,?)`
+    );
+    const list = p.medias?.length ? p.medias : p.media ? [p.media] : [];
+    list.forEach((m, k) =>
+      ins.run(
+        scheduleId,
+        ownMediaPath(m.stored_path, scheduleId),
+        m.mimetype ?? null,
+        m.kind ?? p.payloadType,
+        m.duration_seconds ?? null,
+        m.waveform_json ?? null,
+        k
+      )
     );
   }
 
@@ -1000,9 +1117,27 @@ function writeScheduleRows(scheduleId, p) {
   }
 }
 
+// Gate Pro no MOTOR: varias opcoes de mensagem (recorrente variavel) e varias
+// midias por mensagem sao Pro. O texto com spintax NAO e barrado aqui — um
+// agendamento criado no Pro tem de poder ser re-salvo se a licenca cair, e o
+// render resolve a primeira variacao na free em vez de vazar as chaves.
+function proFeatureBlocked(p) {
+  if (editionState.edition === 'pro') return null;
+  if ((p.variantCount ?? 1) > 1) {
+    return 'Varias opcoes de mensagem (recorrente variavel) sao exclusivas do plano Pro.';
+  }
+  const multi =
+    (p.optionSteps ?? []).some((steps) => steps.some((s) => (s.medias?.length ?? 0) > 1)) ||
+    (p.medias?.length ?? 0) > 1;
+  if (multi) return 'Varias midias por mensagem (rodizio) sao exclusivas do plano Pro.';
+  return null;
+}
+
 function createSchedule(res, body) {
   const p = parseScheduleInput(body);
   if (p.error) return json(res, 400, { error: 'bad_request', message: p.error });
+  const blocked = proFeatureBlocked(p);
+  if (blocked) return json(res, 403, { error: 'pro_required', message: blocked });
 
   const now = new Date().toISOString();
   const account = db.prepare('SELECT id FROM accounts ORDER BY id LIMIT 1').get();
@@ -1015,8 +1150,9 @@ function createSchedule(res, body) {
         `INSERT INTO schedules
            (account_id, name, scheduled_at, payload_type, content_mode, default_json, status, created_at,
             kind, recur_dow, recur_time, recur_week_mod, recur_week_rem,
-            last_run_at, step_min_s, step_max_s, account_ids_json)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+            last_run_at, step_min_s, step_max_s, account_ids_json,
+            variant_mode, variant_count, variant_current, variant_used)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       )
       .run(
         account?.id ?? null,
@@ -1035,7 +1171,11 @@ function createSchedule(res, body) {
         p.initialLastRun,
         p.stepMin,
         p.stepMax,
-        p.poolJson
+        p.poolJson,
+        p.variantMode,
+        p.variantCount,
+        null, // variant_current: sorteado no 1o disparo (e gravado la)
+        null // variant_used: ciclo comeca vazio
       );
     scheduleId = r.lastInsertRowid;
     writeScheduleRows(scheduleId, p);
@@ -1056,13 +1196,35 @@ function updateSchedule(res, id, body) {
 
   const p = parseScheduleInput(body);
   if (p.error) return json(res, 400, { error: 'bad_request', message: p.error });
+  const blocked = proFeatureBlocked(p);
+  if (blocked) return json(res, 403, { error: 'pro_required', message: blocked });
 
-  // Arquivos de midia unica antigos: removidos do disco apos o commit, exceto
-  // os que a nova versao continua referenciando (edicao mantendo o mesmo arquivo).
-  const oldAssets = db.prepare('SELECT path FROM media_assets WHERE schedule_id = ?').all(id);
+  // Arquivos de midia antigos: removidos do disco apos o commit, exceto os que
+  // a nova versao continua referenciando (edicao mantendo o mesmo arquivo).
+  // Inclui as midias dos PASSOS — antes so `media_assets` entrava aqui, e cada
+  // edicao de sequencia deixava os arquivos dos passos orfaos no disco.
+  const oldAssets = [
+    ...db.prepare('SELECT path FROM media_assets WHERE schedule_id = ?').all(id),
+    ...db
+      .prepare(
+        `SELECT m.path FROM schedule_step_media m
+           JOIN schedule_steps s ON s.id = m.step_id
+          WHERE s.schedule_id = ?`
+      )
+      .all(id),
+    ...db
+      .prepare('SELECT media_path AS path FROM schedule_steps WHERE schedule_id = ? AND media_path IS NOT NULL')
+      .all(id),
+  ];
   const keepPaths = new Set();
-  if (p.richSteps) for (const s of p.richSteps) if (s.media?.stored_path) keepPaths.add(s.media.stored_path);
-  if (['audio', 'video', 'image'].includes(p.payloadType) && p.media?.stored_path) keepPaths.add(p.media.stored_path);
+  for (const steps of p.optionSteps ?? []) {
+    for (const s of steps) for (const m of s.medias ?? []) if (m.stored_path) keepPaths.add(m.stored_path);
+  }
+  if (['audio', 'video', 'image'].includes(p.payloadType)) {
+    for (const m of p.medias?.length ? p.medias : p.media ? [p.media] : []) {
+      if (m.stored_path) keepPaths.add(m.stored_path);
+    }
+  }
 
   db.exec('BEGIN;');
   try {
@@ -1071,7 +1233,8 @@ function updateSchedule(res, id, body) {
          name = ?, scheduled_at = ?, payload_type = ?, content_mode = ?, default_json = ?,
          status = ?, kind = ?, recur_dow = ?, recur_time = ?,
          recur_week_mod = ?, recur_week_rem = ?, last_run_at = ?, recur_fired_at = NULL,
-         step_min_s = ?, step_max_s = ?, account_ids_json = ?, rotation_offset = 0
+         step_min_s = ?, step_max_s = ?, account_ids_json = ?, rotation_offset = 0,
+         variant_mode = ?, variant_count = ?, variant_current = NULL, variant_used = NULL
        WHERE id = ?`
     ).run(
       p.name,
@@ -1089,9 +1252,16 @@ function updateSchedule(res, id, body) {
       p.stepMin,
       p.stepMax,
       p.poolJson,
+      p.variantMode,
+      p.variantCount,
       id
     );
     db.prepare('DELETE FROM schedule_targets WHERE schedule_id = ?').run(id);
+    // As midias dos passos saem ANTES dos passos: com PRAGMA foreign_keys = ON,
+    // apagar o passo com filhos referenciando-o falha a transacao.
+    db.prepare(
+      'DELETE FROM schedule_step_media WHERE step_id IN (SELECT id FROM schedule_steps WHERE schedule_id = ?)'
+    ).run(id);
     db.prepare('DELETE FROM schedule_steps WHERE schedule_id = ?').run(id);
     db.prepare('DELETE FROM media_assets WHERE schedule_id = ?').run(id);
     writeScheduleRows(id, p);
@@ -1297,24 +1467,56 @@ function safeObj(s) {
   }
 }
 
+// Keymaker: maximo de midias por mensagem (rodizio). Nao e truncamento
+// silencioso — passar do teto e erro, para o usuario saber.
+const MAX_MEDIAS = 10;
+
+// Midias de um passo. `medias[]` e a forma nova; `media` (singular) segue
+// aceito — e o que clientes antigos, planos e a ponte MCP mandam.
+function stepMediaList(raw) {
+  const list = Array.isArray(raw?.medias) && raw.medias.length
+    ? raw.medias
+    : raw?.media
+      ? [raw.media]
+      : [];
+  return list.filter((m) => m && m.stored_path);
+}
+
+// Keymaker: recusa sintaxe de variacao quebrada ANTES de gravar. Estrito na
+// porta, tolerante no disparo — o worker manda o texto literal em vez de
+// travar a fila, mas aqui o usuario esta na tela e pode corrigir.
+function spinError(text, label) {
+  if (typeof text !== 'string' || !text.includes('{{')) return null;
+  const v = spinValidate(text);
+  return v.ok ? null : `${label}: ${v.errors[0]}`;
+}
+
 // Valida e normaliza um passo de sequencia (qualquer formato).
-// Retorna { payload_type, body_json, media } ou { error }.
+// Retorna { payload_type, body_json, media, medias } ou { error }.
 function normalizeStep(raw) {
   const type = ['text', 'image', 'audio', 'video', 'poll'].includes(raw?.type) ? raw.type : 'text';
+  const medias = stepMediaList(raw);
+  if (medias.length > MAX_MEDIAS) {
+    return { error: `maximo de ${MAX_MEDIAS} midias por mensagem (recebidas ${medias.length})` };
+  }
 
   if (type === 'text') {
     const text = String(raw.text ?? '').trim();
     if (!text) return { error: 'mensagem de texto vazia na sequencia' };
-    return { payload_type: 'text', body_json: JSON.stringify({ text }), media: null };
+    const e = spinError(text, 'texto');
+    if (e) return { error: e };
+    return { payload_type: 'text', body_json: JSON.stringify({ text }), media: null, medias: [] };
   }
   if (type === 'image' || type === 'video') {
-    if (!raw.media?.stored_path) return { error: `envie o arquivo de ${type === 'image' ? 'imagem' : 'video'}` };
+    if (!medias.length) return { error: `envie o arquivo de ${type === 'image' ? 'imagem' : 'video'}` };
     const caption = String(raw.text ?? raw.caption ?? '');
-    return { payload_type: type, body_json: JSON.stringify({ caption }), media: raw.media };
+    const e = spinError(caption, 'legenda');
+    if (e) return { error: e };
+    return { payload_type: type, body_json: JSON.stringify({ caption }), media: medias[0], medias };
   }
   if (type === 'audio') {
-    if (!raw.media?.stored_path) return { error: 'envie o arquivo de audio' };
-    return { payload_type: 'audio', body_json: JSON.stringify({}), media: raw.media };
+    if (!medias.length) return { error: 'envie o arquivo de audio' };
+    return { payload_type: 'audio', body_json: JSON.stringify({}), media: medias[0], medias };
   }
   // poll
   const values = Array.isArray(raw.poll?.values)
@@ -1323,6 +1525,10 @@ function normalizeStep(raw) {
   if (!String(raw.poll?.name ?? '').trim() || values.length < 2) {
     return { error: 'enquete da sequencia precisa de pergunta e 2+ opcoes' };
   }
+  const pollErr =
+    spinError(raw.poll.name, 'pergunta da enquete') ||
+    values.map((v, i) => spinError(v, `opcao ${i + 1} da enquete`)).find(Boolean);
+  if (pollErr) return { error: pollErr };
   const selectableCount =
     Number.isInteger(raw.poll.selectableCount) && raw.poll.selectableCount >= 1
       ? Math.min(raw.poll.selectableCount, values.length)
@@ -1331,6 +1537,7 @@ function normalizeStep(raw) {
     payload_type: 'poll',
     body_json: JSON.stringify({ poll: { name: String(raw.poll.name).trim(), values, selectableCount } }),
     media: null,
+    medias: [],
   };
 }
 
@@ -1339,6 +1546,7 @@ function listSchedules() {
     .prepare(
       `SELECT s.id, s.name, s.scheduled_at, s.payload_type, s.content_mode, s.status, s.created_at,
               s.kind, s.recur_dow, s.recur_time, s.recur_week_mod, s.recur_week_rem, s.last_run_at,
+              s.variant_mode, s.variant_count, s.variant_current,
               COUNT(st.id) AS total,
               SUM(st.status = 'sent')   AS sent,
               SUM(st.status = 'failed') AS failed,
@@ -1364,48 +1572,85 @@ function scheduleDetail(res, id) {
     )
     .all(id);
 
-  // Passos normalizados (para reidratar o editor). Cada passo ja traz a midia
-  // como objeto MediaInfo (ou null) — o front consome sem remontar colunas.
-  const steps = db
-    .prepare('SELECT * FROM schedule_steps WHERE schedule_id = ? ORDER BY order_index')
-    .all(id)
-    .map((s) => ({
+  // Passos normalizados (para reidratar o editor). Cada passo traz a LISTA de
+  // midias (rodizio) e `media` = a primeira, que os clientes antigos leem.
+  const rows = db
+    .prepare(
+      `SELECT * FROM schedule_steps WHERE schedule_id = ?
+        ORDER BY COALESCE(option_index, 0), order_index`
+    )
+    .all(id);
+
+  const stepMediasFor = (stepId, legacy) => {
+    const list = db
+      .prepare(
+        `SELECT path, mimetype, kind, duration_seconds, waveform_json
+           FROM schedule_step_media WHERE step_id = ? ORDER BY order_index, id`
+      )
+      .all(stepId)
+      .map((m) => ({
+        stored_path: m.path,
+        mimetype: m.mimetype ?? null,
+        kind: m.kind ?? null,
+        duration_seconds: m.duration_seconds ?? null,
+        waveform_json: m.waveform_json ?? null,
+      }));
+    return list.length ? list : legacy ? [legacy] : [];
+  };
+
+  const normalized = rows.map((s) => {
+    const legacy = s.media_path
+      ? {
+          stored_path: s.media_path,
+          mimetype: s.media_mimetype ?? null,
+          kind: s.media_kind ?? null,
+          duration_seconds: s.media_duration_seconds ?? null,
+          waveform_json: s.media_waveform_json ?? null,
+        }
+      : null;
+    const medias = stepMediasFor(s.id, legacy);
+    return {
       order_index: s.order_index,
+      option_index: s.option_index ?? 0,
       payload_type: s.payload_type ?? 'text',
       body_json: s.body_json ?? (s.text ? JSON.stringify({ text: s.text }) : '{}'),
-      media: s.media_path
-        ? {
-            stored_path: s.media_path,
-            mimetype: s.media_mimetype ?? null,
-            kind: s.media_kind ?? null,
-            duration_seconds: s.media_duration_seconds ?? null,
-            waveform_json: s.media_waveform_json ?? null,
-          }
-        : null,
-    }));
+      media: medias[0] ?? null,
+      medias,
+    };
+  });
 
   // Agendamento legado sem passos (midia/enquete/texto unico via default_json):
   // sintetiza um passo para que qualquer agendamento broadcast seja editavel.
-  if (steps.length === 0 && schedule.content_mode === 'broadcast') {
+  if (normalized.length === 0 && schedule.content_mode === 'broadcast') {
     const body = safeObj(schedule.default_json);
     const pt = schedule.payload_type;
-    const asset = db.prepare('SELECT * FROM media_assets WHERE schedule_id = ? LIMIT 1').get(id);
+    const assets = db
+      .prepare('SELECT * FROM media_assets WHERE schedule_id = ? ORDER BY COALESCE(order_index, 0), id')
+      .all(id);
+    const base = { order_index: 0, option_index: 0 };
     if (pt === 'poll' && body.poll) {
-      steps.push({ order_index: 0, payload_type: 'poll', body_json: JSON.stringify({ poll: body.poll }), media: null });
-    } else if (['image', 'video', 'audio'].includes(pt) && asset) {
-      const media = {
-        stored_path: asset.path,
-        mimetype: asset.mimetype ?? null,
-        kind: asset.kind ?? null,
-        duration_seconds: asset.duration_seconds ?? null,
-        waveform_json: asset.waveform_json ?? null,
-      };
+      normalized.push({ ...base, payload_type: 'poll', body_json: JSON.stringify({ poll: body.poll }), media: null, medias: [] });
+    } else if (['image', 'video', 'audio'].includes(pt) && assets.length) {
+      const medias = assets.map((a) => ({
+        stored_path: a.path,
+        mimetype: a.mimetype ?? null,
+        kind: a.kind ?? null,
+        duration_seconds: a.duration_seconds ?? null,
+        waveform_json: a.waveform_json ?? null,
+      }));
       const bj = pt === 'audio' ? '{}' : JSON.stringify({ caption: body.text ?? '' });
-      steps.push({ order_index: 0, payload_type: pt, body_json: bj, media });
+      normalized.push({ ...base, payload_type: pt, body_json: bj, media: medias[0], medias });
     } else {
-      steps.push({ order_index: 0, payload_type: 'text', body_json: JSON.stringify({ text: body.text ?? '' }), media: null });
+      normalized.push({ ...base, payload_type: 'text', body_json: JSON.stringify({ text: body.text ?? '' }), media: null, medias: [] });
     }
   }
+
+  // `options` = passos agrupados por opcao (recorrente variavel).
+  // `steps` = a opcao 1, mantido para nao quebrar cliente/plano que le so isso.
+  const optionCount = Math.max(1, ...normalized.map((s) => (s.option_index ?? 0) + 1));
+  const options = Array.from({ length: optionCount }, (_, i) =>
+    normalized.filter((s) => (s.option_index ?? 0) === i)
+  ).filter((list) => list.length > 0);
 
   return json(res, 200, {
     schedule: {
@@ -1413,7 +1658,8 @@ function scheduleDetail(res, id) {
       account_ids: safeArr(schedule.account_ids_json),
       recur_week_parity: colsToParity(schedule),
     },
-    steps,
+    steps: options[0] ?? [],
+    options,
     targets,
   });
 }
@@ -1435,10 +1681,26 @@ function deleteSchedule(res, id) {
   const s = db.prepare('SELECT id FROM schedules WHERE id = ?').get(id);
   if (!s) return json(res, 404, { error: 'not_found' });
 
-  const assets = db.prepare('SELECT path FROM media_assets WHERE schedule_id = ?').all(id);
+  const assets = [
+    ...db.prepare('SELECT path FROM media_assets WHERE schedule_id = ?').all(id),
+    ...db
+      .prepare(
+        `SELECT m.path FROM schedule_step_media m
+           JOIN schedule_steps s ON s.id = m.step_id
+          WHERE s.schedule_id = ?`
+      )
+      .all(id),
+    ...db
+      .prepare('SELECT media_path AS path FROM schedule_steps WHERE schedule_id = ? AND media_path IS NOT NULL')
+      .all(id),
+  ];
   db.exec('BEGIN;');
   try {
     db.prepare('DELETE FROM schedule_targets WHERE schedule_id = ?').run(id);
+    // Filhos antes do pai (PRAGMA foreign_keys = ON).
+    db.prepare(
+      'DELETE FROM schedule_step_media WHERE step_id IN (SELECT id FROM schedule_steps WHERE schedule_id = ?)'
+    ).run(id);
     db.prepare('DELETE FROM schedule_steps WHERE schedule_id = ?').run(id);
     db.prepare('DELETE FROM media_assets WHERE schedule_id = ?').run(id);
     db.prepare('DELETE FROM schedules WHERE id = ?').run(id);

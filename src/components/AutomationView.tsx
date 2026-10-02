@@ -405,6 +405,8 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
               <>
                 <span className="hint">{a.type === "dm" ? "Enviada no privado do membro." : "Postada no grupo."} Texto, imagem, áudio, vídeo, enquete e até sequência.</span>
                 <StepSequenceEditor
+                  scope="automation"
+                  isPro={isPro}
                   steps={a.steps}
                   setSteps={(updater) => setActionSteps(i, updater)}
                   intMin={a.intMin}

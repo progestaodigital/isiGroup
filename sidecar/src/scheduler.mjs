@@ -3,8 +3,9 @@
 // Disparo sequencial com espacamento curto e levemente aleatorio entre grupos —
 // apenas para nao floodar e respeitar rate limit, nunca para evadir deteccao.
 
-import { readFileSync } from 'node:fs';
 import { weekAllows } from './weeks.mjs';
+import { createMediaCache } from './mediapool.mjs';
+import { applySpin, createDeckSet, nextVariant } from './spin.mjs';
 
 const TICK_MS = 5000;
 const SPACING_MIN_MS = 2500;
@@ -21,9 +22,122 @@ const SKIP_NO_COVERAGE = Symbol('skip_no_coverage'); // nenhum chip do pool esta
 const SKIP_NO_ADMIN = Symbol('skip_no_admin'); // grupo "so admins" sem chip admin
 const DEFER = Symbol('defer'); // ha chip elegivel, mas nenhum conectado agora
 
-export function createScheduler(db, wa) {
+export function createScheduler(db, wa, editionState) {
   const inFlight = new Set();
   let timer = null;
+
+  // --- Keymaker (Fase K): variacao de mensagem/midia ------------------------
+  // Na edicao free o recurso e bloqueado, mas o render CONTINUA rodando com o
+  // indice 0: a mensagem nunca pode sair com as chaves cruas num grupo (um
+  // plano importado via MCP pode ter spintax mesmo na free).
+  const isPro = () => editionState?.edition === 'pro';
+
+  // Label do chip, para a variavel {{chip}}. Cache por execucao.
+  const labels = new Map();
+  function chipLabel(accountId) {
+    const id = accountId ?? null;
+    if (labels.has(id)) return labels.get(id);
+    const row = id
+      ? db.prepare('SELECT label FROM accounts WHERE id = ?').get(id)
+      : db.prepare('SELECT label FROM accounts ORDER BY id LIMIT 1').get();
+    const v = row?.label ?? '';
+    labels.set(id, v);
+    return v;
+  }
+
+  // Midias de um passo (rodizio). Prefere a tabela filha; cai nas colunas
+  // legadas do passo quando ela esta vazia (ver migration 019).
+  function stepMedias(step) {
+    const rows = db
+      .prepare(
+        `SELECT path, mimetype, kind, duration_seconds, waveform_json
+           FROM schedule_step_media WHERE step_id = ? ORDER BY order_index, id`
+      )
+      .all(step.id);
+    if (rows.length) return rows;
+    if (step.media_path) {
+      return [
+        {
+          path: step.media_path,
+          mimetype: step.media_mimetype,
+          kind: step.media_kind,
+          duration_seconds: step.media_duration_seconds,
+          waveform_json: step.media_waveform_json,
+        },
+      ];
+    }
+    return [];
+  }
+
+  // Sorteia a midia e ja devolve o buffer. Se o arquivo sorteado desapareceu
+  // do disco, tenta as outras — so fica sem midia se TODAS sumirem.
+  function pickMedia(medias, cache, key, draw) {
+    if (!medias.length) return { media: null, buf: null };
+    const idx = medias.length > 1 ? draw(key, medias.length) : 0;
+    const order = [idx];
+    for (let k = 0; k < medias.length; k++) if (k !== idx) order.push(k);
+    for (const k of order) {
+      const buf = cache.read(medias[k].path);
+      if (buf) {
+        if (k !== idx) console.error(`[sched] midia ${idx} ausente; usando a variacao ${k}`);
+        return { media: medias[k], buf };
+      }
+    }
+    return { media: medias[idx], buf: null };
+  }
+
+  // Quantas opcoes de mensagem o agendamento tem (recorrente variavel).
+  // Conta no banco em vez de confiar em variant_count: se o usuario apagou uma
+  // opcao entre disparos, o total reflete a realidade e nextVariant sanea os
+  // indices gravados que sairam de faixa.
+  function variantTotal(scheduleId) {
+    const row = db
+      .prepare(
+        'SELECT COUNT(DISTINCT COALESCE(option_index, 0)) AS n FROM schedule_steps WHERE schedule_id = ?'
+      )
+      .get(scheduleId);
+    return Math.max(1, row?.n ?? 1);
+  }
+
+  // Opcao do disparo EM CURSO. Para o recorrente, foi gravada na transacao que
+  // marcou o dia — a retomada le daqui em vez de sortear de novo.
+  function currentOption(schedule) {
+    const total = variantTotal(schedule.id);
+    const cur = Number.isInteger(schedule.variant_current) ? schedule.variant_current : 0;
+    return cur >= 0 && cur < total ? cur : 0;
+  }
+
+  // Sorteia a opcao do proximo disparo recorrente (estado persistido).
+  function pickVariant(schedule) {
+    const total = variantTotal(schedule.id);
+    if (total <= 1 || !isPro()) return { index: 0, used: [0] };
+    const mode = schedule.variant_mode === 'sequential' ? 'sequential' : 'random';
+    return nextVariant(
+      total,
+      parseArr(schedule.variant_used),
+      Number.isInteger(schedule.variant_current) ? schedule.variant_current : null,
+      mode
+    );
+  }
+
+  // Passos da opcao escolhida. Se a opcao gravada sumiu (edicao do usuario),
+  // cai na opcao 0 em vez de nao enviar nada.
+  function loadSteps(scheduleId, optionIndex) {
+    const q = (opt) =>
+      db
+        .prepare(
+          `SELECT * FROM schedule_steps
+            WHERE schedule_id = ? AND COALESCE(option_index, 0) = ?
+            ORDER BY order_index`
+        )
+        .all(scheduleId, opt);
+    const steps = q(optionIndex);
+    if (steps.length === 0 && optionIndex !== 0) {
+      console.error(`[sched] #${scheduleId}: opcao ${optionIndex} nao existe mais; usando a opcao 1`);
+      return q(0);
+    }
+    return steps;
+  }
 
   // Roteamento por chip (Milestone 2). account_id nulo = conta primaria.
   const isReachable = (accountId) =>
@@ -166,9 +280,19 @@ export function createScheduler(db, wa) {
           // Catch-up: se o app estava fora as 19:00 e subiu 19:10, ainda dispara hoje.
           // O reset revive inclusive alvos pulados: a cobertura e reavaliada no
           // disparo (chipFor), que re-pula sem tentar se continuar descoberto.
+          // RECORRENTE VARIAVEL: a opcao e sorteada AQUI, na mesma transacao
+          // que marca o dia e repoe os alvos, e fica gravada em
+          // variant_current. A retomada do mesmo dia LE esse valor (ver o
+          // caminho `!firstToday` acima) — se sorteasse de novo, metade dos
+          // grupos receberia outra mensagem e `seq_step` apontaria para o
+          // passo de outra opcao.
+          const variant = pickVariant(s);
           db.exec('BEGIN;');
           try {
-            db.prepare('UPDATE schedules SET last_run_at = ?, recur_fired_at = ? WHERE id = ?').run(today, today, s.id);
+            db.prepare(
+              `UPDATE schedules SET last_run_at = ?, recur_fired_at = ?, variant_current = ?, variant_used = ?
+                 WHERE id = ?`
+            ).run(today, today, variant.index, JSON.stringify(variant.used), s.id);
             db.prepare(
               "UPDATE schedule_targets SET status = 'pending', sent_at = NULL, error = NULL, seq_step = 0 WHERE schedule_id = ?"
             ).run(s.id);
@@ -177,7 +301,10 @@ export function createScheduler(db, wa) {
             db.exec('ROLLBACK;');
             throw e;
           }
-          console.error(`[sched] recorrente #${s.id} disparando ${today} ${hhmm}`);
+          s.variant_current = variant.index;
+          const totalOpts = variantTotal(s.id);
+          const qual = totalOpts > 1 ? ` opcao ${variant.index + 1}/${totalOpts}` : '';
+          console.error(`[sched] recorrente #${s.id} disparando ${today} ${hhmm}${qual}`);
         }
         const r = await sendPending(s.id, s); // status do schedule permanece 'active'
         if (!firstToday && r.attempted > 0) {
@@ -233,10 +360,9 @@ export function createScheduler(db, wa) {
     };
 
     // Sequencia de mensagens (broadcast texto): 1+ passos com intervalo entre eles.
+    // No recorrente variavel, os passos sao os da opcao sorteada para este dia.
     if (schedule.content_mode === 'broadcast') {
-      const steps = db
-        .prepare('SELECT * FROM schedule_steps WHERE schedule_id = ? ORDER BY order_index')
-        .all(scheduleId);
+      const steps = loadSteps(scheduleId, currentOption(schedule));
       if (steps.length > 0) {
         const stats = await sendSequence(scheduleId, schedule, targets, steps, chipFor);
         if (pool.length && stats.attempted > 0) bumpRotation(scheduleId);
@@ -245,19 +371,19 @@ export function createScheduler(db, wa) {
       // sem passos: agendamento legado (midia/poll/texto unico via default_json)
     }
 
-    // Midia (imagem/audio/video) lida do disco uma vez e reutilizada nos alvos.
-    let media = null;
-    let mediaBuffer = null;
+    // Midia (imagem/audio/video): N variacoes, sorteadas POR GRUPO. O cache
+    // com orcamento de bytes evita somar os arquivos todos na RAM.
+    let medias = [];
     if (['audio', 'video', 'image'].includes(schedule.payload_type)) {
-      media = db.prepare('SELECT * FROM media_assets WHERE schedule_id = ? LIMIT 1').get(scheduleId);
-      if (media?.path) {
-        try {
-          mediaBuffer = readFileSync(media.path);
-        } catch (e) {
-          console.error(`[sched] midia ausente p/ #${scheduleId}: ${e?.message}`);
-        }
-      }
+      medias = db
+        .prepare(
+          `SELECT path, mimetype, kind, duration_seconds, waveform_json
+             FROM media_assets WHERE schedule_id = ? ORDER BY COALESCE(order_index, 0), id`
+        )
+        .all(scheduleId);
     }
+    const cache = createMediaCache();
+    const draw = createDeckSet(); // baralhos desta execucao (sem repetir entre grupos)
 
     const stats = { attempted: 0, sent: 0, failed: 0, skipped: 0, deferred: 0 };
     for (let i = 0; i < targets.length; i++) {
@@ -273,7 +399,13 @@ export function createScheduler(db, wa) {
         stats.deferred++;
         continue; // permanece 'pending'; retomada quando um chip reconectar
       }
-      const content = buildContent(schedule, tgt, media, mediaBuffer);
+      // Um sorteio POR GRUPO: midia, texto e legenda resolvidos agora.
+      const { media, buf } = pickMedia(medias, cache, 'midia', draw);
+      const ctx = { grupo: tgt.name ?? '', chip: chipLabel(acct), now: new Date() };
+      const content = applySpin(buildContent(schedule, tgt, media, buf), {
+        ctx,
+        draw: isPro() ? draw : () => 0,
+      });
 
       stats.attempted++;
       try {
@@ -360,30 +492,33 @@ export function createScheduler(db, wa) {
     // Nada a enviar (tudo pulado/adiado): sai sem gastar as esperas entre passos.
     if (targets.every((t) => skipped.has(t.id) || stuck.has(t.id))) return stats;
 
-    // Le a midia de cada passo (imagem/audio/video) uma unica vez, com cache
-    // por caminho, e monta o conteudo reutilizado em todos os grupos.
-    const bufCache = new Map(); // media_path -> Buffer
-    const contents = steps.map((step) => {
-      let mediaBuffer = null;
-      if (step.media_path) {
-        if (!bufCache.has(step.media_path)) {
-          try {
-            bufCache.set(step.media_path, readFileSync(step.media_path));
-          } catch (e) {
-            bufCache.set(step.media_path, null);
-            console.error(`[sched] midia do passo ausente (#${scheduleId}): ${e?.message}`);
-          }
-        }
-        mediaBuffer = bufCache.get(step.media_path);
-      }
-      return buildStepContent(step, mediaBuffer);
-    });
+    // Midia lida sob demanda, com cache por caminho e orcamento de bytes (o
+    // rodizio pode ter N arquivos por passo — ver mediapool.mjs).
+    //
+    // O TEXTO nao pode mais ser montado uma vez e reusado em todos os grupos:
+    // cada grupo recebe o seu sorteio. Por isso o conteudo passa a ser montado
+    // DENTRO do loop de alvos (`contentFor`), enquanto a leitura de disco
+    // continua acontecendo uma vez por arquivo, no cache.
+    const cache = createMediaCache();
+    const draw = createDeckSet(); // baralhos desta execucao (por passo e campo)
+    const mediasByStep = steps.map((step) => stepMedias(step));
+
+    const contentFor = (s, ctx) => {
+      const { media, buf } = pickMedia(mediasByStep[s], cache, `s${s}:midia`, draw);
+      const base = buildStepContent(steps[s], media, buf);
+      return applySpin(base, {
+        ctx,
+        draw: isPro() ? (key, total) => draw(`s${s}:${key}`, total) : () => 0,
+      });
+    };
 
     for (let i = 0; i < targets.length; i++) {
       const tgt = targets[i];
       if (stuck.has(tgt.id) || skipped.has(tgt.id)) continue;
       const acct = chipByTarget[tgt.id];
       let sentAny = false; // enviou algum passo a este grupo nesta execucao?
+      // Contexto das variaveis deste grupo ({{grupo}}, {{chip}}, {{saudacao}}…).
+      const ctx = { grupo: tgt.name ?? '', chip: chipLabel(acct), now: new Date() };
 
       for (let s = 0; s < steps.length; s++) {
         if (s < (tgt.seq_step || 0)) continue; // passo ja enviado a este alvo (retomada)
@@ -395,7 +530,7 @@ export function createScheduler(db, wa) {
         }
         stats.attempted++;
         try {
-          await sendWithRetry(acct, tgt.jid, contents[s]);
+          await sendWithRetry(acct, tgt.jid, contentFor(s, ctx));
           db.prepare('UPDATE schedule_targets SET seq_step = ? WHERE id = ?').run(s + 1, tgt.id);
           tgt.seq_step = s + 1;
           sentAny = true;
@@ -436,7 +571,9 @@ export function createScheduler(db, wa) {
 }
 
 // Conteudo de um PASSO de sequencia (autossuficiente: tipo + corpo + midia).
-function buildStepContent(step, mediaBuffer) {
+// `media` e a variacao SORTEADA: waveform, duracao e mimetype do audio vem
+// dela, nao das colunas do passo — cada arquivo tem os seus (Fase K5).
+function buildStepContent(step, media, mediaBuffer) {
   const type = step.payload_type || 'text';
   const body = step.body_json ? parseContent(step.body_json) : { text: step.text ?? '' };
   switch (type) {
@@ -448,9 +585,9 @@ function buildStepContent(step, mediaBuffer) {
       return {
         audio: mediaBuffer,
         ptt: true,
-        mimetype: step.media_mimetype || 'audio/ogg; codecs=opus',
-        seconds: step.media_duration_seconds || undefined,
-        waveform: waveformBuffer(step.media_waveform_json),
+        mimetype: media?.mimetype || step.media_mimetype || 'audio/ogg; codecs=opus',
+        seconds: media?.duration_seconds || step.media_duration_seconds || undefined,
+        waveform: waveformBuffer(media?.waveform_json ?? step.media_waveform_json),
       };
     case 'poll':
       return { poll: body.poll };

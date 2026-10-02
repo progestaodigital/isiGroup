@@ -9,7 +9,10 @@ Tauri 2 (core Rust) + React/TS (front) + sidecar Node (Baileys + SQLite). Conect
 contas de WhatsApp e atua nos grupos/comunidades onde a conta é admin: agenda
 mensagens (texto/imagem/áudio PTT/vídeo/enquete, com sequências), automatiza por
 gatilho (entrou/saiu/mensagem/contém-link → mensagem/DM/remover/webhook) e emite
-webhooks assinados (HMAC). Pacing é só anti-flood, **nunca** para evadir detecção.
+webhooks assinados (HMAC). O **Keymaker** (Pro) gera variação de mensagem a partir de
+um texto (spintax + variáveis), alterna entre várias mídias e, no recorrente variável,
+escolhe uma de N mensagens por disparo. Pacing é só anti-flood, **nunca** para evadir
+detecção — e o Keymaker é variação de copy, não evasão (sem caractere invisível/homoglifo).
 
 ## Comandos
 
@@ -21,7 +24,15 @@ pnpm build                   # front: tsc + vite build (também é o typecheck)
 pnpm tauri build             # build de produção (instalador NSIS); assina se env de assinatura estiver setado
 ```
 
-- **Não há suíte de testes automatizada.** Verificação = `node --check <arquivo.mjs>` para sintaxe + **smoke test**: subir o sidecar contra um DB temporário e bater nos endpoints.
+- **Testes:** o motor do Keymaker tem suíte unitária com o runner embutido do Node (zero dependência nova) e há três smokes auto-suficientes:
+  ```bash
+  cd sidecar
+  node --test src/spin.test.mjs   # 41 testes do motor de variação
+  node smoke/routes.mjs           # sobe o sidecar num DB temporário e bate nas rotas
+  node smoke/dispatch.mjs         # roda o scheduler contra um `wa` falso (disparo por grupo)
+  node smoke/automation.mjs       # dispara um gatilho de verdade (variáveis, rodízio)
+  ```
+  Fora disso **não há suíte**. Verificação = `node --check <arquivo.mjs>` para sintaxe + smoke manual: subir o sidecar contra um DB temporário e bater nos endpoints.
   ```bash
   cd sidecar
   TMP=/tmp/isi; rm -rf $TMP; mkdir -p $TMP
@@ -62,9 +73,16 @@ que controla o **gating** dos recursos Pro **no motor** (não só na UI). São P
 **multi-chip** (2º chip no `/accounts` e no `/accounts/:id/connect`), **automação em
 grupo onde não é admin** (`automation.mjs::allowedByEdition`), o **responder de IA**
 (handler em `index.mjs`), e — por um **gate de prefixo de rota** no topo do `route()` —
-**Agentes de IA** (`/ai/*`), **Planos & IA** (`/plans/*`, `/integration*`) e
-**Exportar** (`/export*`). O gate de prefixo existe porque a UI não é a única porta:
-a ponte MCP e o executor de planos batem nessas rotas direto.
+**Agentes de IA** (`/ai/*`), **Planos & IA** (`/plans/*`, `/integration*`),
+**Exportar** (`/export*`) e o preview do **Keymaker** (`/spin*`). Além disso,
+`createSchedule`/`updateSchedule` recusam com 403 **várias opções de mensagem**
+(recorrente variável) e **várias mídias por mensagem**. O gate de prefixo existe
+porque a UI não é a única porta: a ponte MCP e o executor de planos batem nessas
+rotas direto.
+
+Texto com spintax **não** é barrado ao salvar na free (um agendamento criado no Pro
+precisa poder ser re-salvo se a licença cair): o motor resolve com o **índice 0**, de
+modo que a mensagem nunca sai com as chaves cruas.
 
 ## Modelo de dados e fluxos (o que exige ler vários arquivos)
 
@@ -73,6 +91,9 @@ a ponte MCP e o executor de planos batem nessas rotas direto.
 - **Sync de alvos é AUTORITATIVO, não incremental** (`syncTargets`): `groupFetchAllParticipating` devolve a lista completa do chip, então o que estava em `targets` para aquele `account_id` e não voltou é **apagado** (junto com as `schedule_targets` que o referenciam — FK). Guarda: fetch vazio com alvos no banco não poda (sync parcial). `pruneOrphanTargets` (arranque + toda sync) remove grupos cujo chip de origem sumiu. E trocar o número no mesmo slot de chip apaga os grupos do número anterior já na conexão (`updateAccountOnConnect`).
 - **Disparo group-first** (`SchedulerView` + `index.mjs::createSchedule` + `scheduler.mjs`): o usuário seleciona **grupos distintos** e **chips**; o front resolve o roteamento (round-robin por grupo entre chips que cobrem o grupo, via `/coverage`) e envia `targets: [{target_id, account_id, skipped?}]`. O scheduler envia cada alvo pelo chip do `account_id` (`sendVia`; `null` = primária). Grupos sem cobertura ⇒ `skipped_no_coverage`.
 - **Automação multi-chip** (`automation.mjs`): os handlers `onMessage`/`onMembership` recebem `account_id`+`msg_id` e fazem **dedup** por (grupo, msg-id/evento) — N chips no mesmo grupo disparam a regra **1×**. O "chip que responde" é o menor chip **conectado** membro do grupo (`responderFor`); `remove` usa o menor chip **admin** (`adminResponderFor`). Trava: admin nunca é removido por gatilho.
+- **Keymaker — variação por envio** (`spin.mjs` + `mediapool.mjs`): `{{a|b|c}}` sorteia uma variação; variável de contexto é um bloco de nome reservado (`{{grupo}}`, `{{chip}}`, `{{saudacao}}`…). Duas regras de compatibilidade que **não podem ser quebradas**: texto sem `{{` volta pelo **caminho rápido** (byte a byte idêntico, sem unescape/trim), e `{{...}}` só é bloco **se tiver pipe ou for variável reservada** (`{{R$ 100}}` sai literal). `render()` nunca lança: template quebrado passa literal no disparo, mas é **recusado ao salvar**. `renderAt(t, i)` resolve a combinação nº *i* por radix misto, o que viabiliza contador exato e baralho sem repetição. Detalhe crítico do refactor: o conteúdo da sequência era montado **uma vez** e reusado em todos os grupos — hoje a leitura de mídia continua cacheada (orçamento de 128 MB), mas o **texto é montado dentro do loop de alvos**. Doc completa: **`KEYMAKER.md`**.
+- **Mídia é lista, não coluna** (migration 019): `schedule_step_media` (filha de `schedule_steps`) existe porque áudio PTT tem waveform/duração/mimetype **por arquivo**. A mídia 0 é **dual-written** nas colunas `media_*` do passo (rollback do auto-updater ainda enxerga a mídia). Com `PRAGMA foreign_keys = ON`, apagar passos exige apagar as mídias filhas **antes** — vale para `updateSchedule` e `deleteSchedule`.
+- **Recorrente variável** (migration 020): `option_index` em `schedule_steps` agrupa os passos por **opção**; `order_index` segue sendo a ordem dentro da opção. Não existe `kind` novo — grava `kind='recurring'` + `variant_mode`, porque um terceiro kind vazaria para toda query que filtra por kind. A opção sorteada é gravada em `variant_current` **dentro da transação** que marca `last_run_at`/`recur_fired_at` e repõe os alvos; a **retomada do mesmo dia lê** esse valor em vez de sortear, senão o disparo sairia partido em duas mensagens e `seq_step` apontaria para o passo de outra opção.
 - **Webhook** (`webhooks.mjs`): `POST` JSON assinado com HMAC-SHA256 (header `x-isi-signature`), retry com backoff. Payload inclui `chip{account_id,label}`, `group{jid,name}`, `lead{name,phone,jid}`, `message`, `date`/`time`. O telefone do lead vem de `participant.phoneNumber` nos eventos join/leave (Baileys 7 usa `@lid` para participantes — ver gotcha).
 - **Planos (isiplan) & MCP** (`plans.mjs` + `integration.mjs` + `sidecar/mcp.mjs`): plano JSON declarativo importável (grupos por seletor `names`/`match`/`ref` — nunca jid; executor persistente `plan_runs`/`plan_steps` que **delega às filas existentes** e espera jobs bulk p/ resolver `ref`s; guarda de reimportação por hash com confirmação). A ponte MCP é stdio sem SDK, descoberta via `%APPDATA%/isigroup/integration.json` (toggle na aba Planos & IA); ações de risco criam `pending_approvals` que o usuário aprova no app (banner no `MainShell`). Doc completa + prompts: **`PLANOS.md`**.
 
@@ -90,10 +111,14 @@ a ponte MCP e o executor de planos batem nessas rotas direto.
 - **PowerShell `Set-Content -Encoding utf8` adiciona BOM** e quebra o parse de JSON pelo Vite/Node. Para editar `package.json`/`tauri.conf.json` use a ferramenta de edição (sem BOM) ou `[System.IO.File]::WriteAllText` com UTF8 sem BOM.
 - **Áudio:** WhatsApp só entrega nota de voz (PTT) em **opus/ogg**; `media.mjs` transcodifica com `ffmpeg-static` e extrai waveform real do PCM.
 - **`@all`:** menção oculta de todos os membros (array `mentions` sem poluir o texto) — tratado em `sendContent`.
+- **Parser do Keymaker:** entrada hostil (`"{{"` repetido 200×) virava backtracking exponencial. Guardas: posição que já falhou como início de bloco fica **memoizada**, bloco sem `}}` adiante é rejeitado em O(1), e há um **orçamento de trabalho** que aborta o parse (quem chama trata como texto literal). Se mexer no parser, rode `node --test src/spin.test.mjs` — o grupo "entradas hostis" cobre isso.
 - **Commits:** mensagens terminam com `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`. Em PowerShell, evitar here-string para a mensagem (parsing frágil) — preferir `git commit -F <arquivo>`.
 
 ## Estado do projeto
 
 Ver **`ROADMAP.md`**. Milestone 1 (Fases 0–6) e Milestone 2 (multi-chip Pro, Fases A–F)
 estão **código-completos**; a validação ao vivo do multi-chip com 2+ chips reais é a
-pendência aberta. Releases publicadas em `progestaodigital/isiGroup`.
+pendência aberta. O **Keymaker** (Fases K0–K7: spintax + variáveis, rodízio de mídia,
+recorrente variável) está código-completo e verificado em unitário + smoke — falta
+validação ao vivo com grupos reais. Doc: **`KEYMAKER.md`**. Releases publicadas em
+`progestaodigital/isiGroup`.

@@ -28,6 +28,7 @@
 | **4+5** ✅ | **Automações & Gatilhos** (unificado) | Gatilhos: entrou/saiu/mensagem(4 matches)/contém-link. Ações: msg no grupo, msg no privado, excluir, webhook (HMAC). **Validado ao vivo (webhook + DM + join/leave) em 2026-06-28.** | 1 |
 | **6** 🟡 | Hardening | Instalador NSIS + sidecar embarcado + ícone + arranque não-bloqueante ✅. **Auto-updater nativo assinado (minisign) ✅.** Pacing anti-flood ✅. **Pendente:** live runbook de licença (7 cenários). | 2–5 |
 | **A–F** 🆕 | **Multi-chip (Pro)** — Milestone 2 | Vários chips por usuário, proxy por chip, disparo/automação group-first com cobertura e rotação | 1, 2, 4+5, 6 |
+| **K0–K7** 🟡 | **Keymaker (Pro)** — Milestone 3 | Spintax + variáveis de contexto, rodízio de mídia, recorrente variável. Código-completo e verificado (41 unitários + 48 checagens de smoke); **validação ao vivo pendente**. Ver `KEYMAKER.md` | 2, 3, 4+5 |
 
 > Fases 4 e 5 dependem só da Fase 1 (conexão), então podem ser paralelizadas depois do agendador, se houver banda.
 
@@ -417,6 +418,28 @@ Instalador gerado, app atualiza sozinho, opera de forma estável com pacing corr
 - [ ] Documentar no FAQ (variante Pro) o modelo group-first/cobertura/rotação.
 
 **DoD:** recurso indisponível e bloqueado no sidecar fora do Pro; logs, relatórios e webhooks identificam o chip; FAQ atualizado.
+
+---
+
+## Milestone 3 — Keymaker (Pro)
+
+Variação de mensagem. Três recursos, um motor de sorteio (`sidecar/src/spin.mjs`).
+Doc completa de desenho e casos-limite: **`KEYMAKER.md`**.
+
+| Fase | Entrega | DoD | Status |
+|---|---|---|---|
+| **K0** | Motor `spin.mjs`: parse, contagem, `renderAt` por radix misto, baralhos sem repetição, `applySpin` | `node --test src/spin.test.mjs` verde | ✅ 41 testes |
+| **K1** | Render **por grupo** no scheduler (o conteúdo da sequência era montado 1× e reusado) + rodízio de mídia + sorteio da opção na transação do dia | `node smoke/dispatch.mjs` verde | ✅ 15 checagens |
+| **K2** | Automação: variação em mensagem de grupo e DM, com `{{nome}}`/`{{primeiro_nome}}`; baralhos vivem entre eventos | `node smoke/automation.mjs` verde | ✅ 8 checagens |
+| **K3** | `POST /spin/preview`, validação ao salvar (schedules, regras, planos), gate Pro de prefixo `/spin`, gravação de opções/mídias | `node smoke/routes.mjs` verde | ✅ 25 checagens |
+| **K4** | UI: `KeymakerText` (contador de combinações, exemplos sorteados, atalho de variação e variáveis), lista de mídias, abas de opção, 3º tipo de disparo | `pnpm build` limpo | ✅ |
+| **K5** | Migration 019: `schedule_step_media` + `media_assets.order_index`, com backfill e dual-write; toques em `ownMediaPath`, limpeza na edição, exportador e planos | migrations aplicam em DB novo e existente | ✅ |
+| **K6** | Migration 020: `variant_*` + `option_index`; recorrente variável com opção **grudada no dia** (retomada lê, não sorteia) | retomada pós-crash mantém a mesma opção | ✅ |
+| **K7** | `KEYMAKER.md`, CLAUDE.md, roadmap, smokes no repo | — | ✅ |
+
+**Pendência aberta:** validação ao vivo — disparar para 3+ grupos reais e conferir
+textos distintos, alternância de mídia e, em duas semanas seguidas, opções diferentes
+no recorrente variável.
 
 ---
 

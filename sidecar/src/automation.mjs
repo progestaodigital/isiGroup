@@ -2,12 +2,41 @@
 // Gatilhos: 'message' (match no texto), 'join' (entrou), 'leave' (saiu).
 // Acoes: group_message, dm, remove (com trava de admin), webhook.
 
-import { readFileSync } from 'node:fs';
 import { postWebhook } from './webhooks.mjs';
+import { createMediaCache } from './mediapool.mjs';
+import { applySpin, createDeckSet } from './spin.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export function createAutomation(db, wa, editionState) {
+  // --- Keymaker (Fase K) ----------------------------------------------------
+  // Cache de midia e baralhos de variacao vivem ENTRE eventos: duas entradas
+  // seguidas no grupo nao devem cair na mesma boas-vindas, e a imagem nao
+  // precisa ser relida do disco a cada gatilho. Memoria limitada: o baralho
+  // so rastreia o que ja saiu ate um teto de combinacoes (ver spin.mjs).
+  const mediaCache = createMediaCache();
+  const actionDecks = new Map(); // "<regra>:<acao>" -> conjunto de baralhos
+  function decksFor(key) {
+    let d = actionDecks.get(key);
+    if (!d) {
+      d = createDeckSet();
+      actionDecks.set(key, d);
+    }
+    return d;
+  }
+
+  // Label do chip, para a variavel {{chip}}.
+  const labels = new Map();
+  function chipLabel(accountId) {
+    const id = accountId ?? null;
+    if (labels.has(id)) return labels.get(id);
+    const row = id
+      ? db.prepare('SELECT label FROM accounts WHERE id = ?').get(id)
+      : db.prepare('SELECT label FROM accounts ORDER BY id LIMIT 1').get();
+    const v = row?.label ?? '';
+    labels.set(id, v);
+    return v;
+  }
   // Na edicao free, automacoes so agem em grupos onde a conta e admin.
   function allowedByEdition(jid) {
     if (editionState?.edition === 'pro') return true;
@@ -123,20 +152,29 @@ export function createAutomation(db, wa, editionState) {
     try { const a = JSON.parse(rule.account_ids_json ?? '[]'); if (Array.isArray(a)) allowed = a; } catch { /* ignora */ }
     // Chip que responde (multi-chip): membro conectado de menor id; null = primaria.
     const responder = responderFor(ctx.jid, allowed);
+    // Contexto das variaveis de mensagem. Aqui {{nome}} existe de verdade (o
+    // gatilho tem uma pessoa), diferente do broadcast em grupo.
+    const spinCtx = {
+      nome: ctx.name ?? '',
+      grupo: groupName(ctx.jid) ?? '',
+      chip: chipLabel(responder ?? ctx.account_id),
+      now: new Date(),
+    };
     for (let ai = 0; ai < actions.length; ai++) {
       const action = actions[ai];
       const cfg = safeParse(action.config_json);
       switch (action.action_type) {
         case 'group_message': {
           // Sequencia rica (texto/imagem/audio/video/enquete) no grupo.
-          const sent = await runMessageAction(responder, ctx.jid, cfg);
+          const sent = await runMessageAction(responder, ctx.jid, cfg, spinCtx, `${rule.id}:${ai}`);
           if (sent) taken.push('group_message');
           break;
         }
         case 'dm': {
           if (ctx.sender) {
             try {
-              const sent = await runMessageAction(responder, ctx.sender, cfg); // DM ao membro (@lid — questao #6)
+              // DM ao membro (@lid — questao #6)
+              const sent = await runMessageAction(responder, ctx.sender, cfg, spinCtx, `${rule.id}:${ai}`);
               if (sent) taken.push('dm');
             } catch (e) {
               taken.push('dm_failed');
@@ -229,30 +267,43 @@ export function createAutomation(db, wa, editionState) {
 
   // Executa uma acao de mensagem (sequencia rica) num jid (grupo ou privado).
   // accountId = chip que envia (null = conta primaria, caminho single-chip).
-  async function runMessageAction(accountId, jid, cfg) {
+  // spinCtx = contexto das variaveis; deckKey = identidade dos baralhos desta
+  // acao (vivem entre eventos para nao repetir a variacao em gatilhos seguidos).
+  async function runMessageAction(accountId, jid, cfg, spinCtx, deckKey) {
     const steps = actionSteps(cfg);
     if (steps.length === 0) return false;
     const send = (j, content) => (accountId ? wa.accountSend(accountId, j, content) : wa.sendContent(j, content));
     const minMs = (cfg.step_min_s ?? 0) * 1000;
     const maxMs = Math.max(minMs, (cfg.step_max_s ?? cfg.step_min_s ?? 0) * 1000);
-    const cache = new Map();
+    const draw = decksFor(deckKey ?? 'anon');
+    const pro = editionState?.edition === 'pro';
 
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
+      // Rodizio de midia: sorteia uma das variacoes e, se o arquivo sorteado
+      // desapareceu do disco, usa outra (so fica sem midia se todas sumirem).
+      const medias = actionMedias(step);
+      let media = null;
       let buf = null;
-      const path = step.media?.stored_path;
-      if (path) {
-        if (!cache.has(path)) {
-          try {
-            cache.set(path, readFileSync(path));
-          } catch (e) {
-            cache.set(path, null);
-            console.error('[auto] midia do passo ausente:', e?.message);
+      if (medias.length) {
+        const idx = medias.length > 1 ? draw(`s${i}:midia`, medias.length) : 0;
+        const order = [idx];
+        for (let k = 0; k < medias.length; k++) if (k !== idx) order.push(k);
+        for (const k of order) {
+          const b = mediaCache.read(medias[k].stored_path);
+          if (b) {
+            media = medias[k];
+            buf = b;
+            break;
           }
         }
-        buf = cache.get(path);
+        if (!media) media = medias[idx];
       }
-      await send(jid, contentFromStep(step, buf)); // @all/link tratados em sendContent
+      const content = applySpin(contentFromStep(step, media, buf), {
+        ctx: spinCtx,
+        draw: pro ? (key, total) => draw(`s${i}:${key}`, total) : () => 0,
+      });
+      await send(jid, content); // @all/link tratados em sendContent
       if (i < steps.length - 1) {
         const wait = minMs + Math.floor(Math.random() * Math.max(1, maxMs - minMs + 1));
         await sleep(wait);
@@ -271,9 +322,22 @@ function actionSteps(cfg) {
   return [];
 }
 
+// Midias de um passo de acao (rodizio). `medias[]` e a forma nova; `media`
+// continua aceito (passo antigo, e o que o front manda com um arquivo so).
+function actionMedias(step) {
+  if (Array.isArray(step?.medias) && step.medias.length) {
+    return step.medias.filter((m) => m?.stored_path);
+  }
+  if (step?.media?.stored_path) return [step.media];
+  return [];
+}
+
 // Conteudo Baileys a partir de um passo (payload_type + body_json + media).
-function contentFromStep(step, mediaBuffer) {
+// `media` e a variacao sorteada: waveform/duracao/mimetype do audio vem dela,
+// porque cada arquivo tem os seus.
+function contentFromStep(step, media, mediaBuffer) {
   const body = safeParse(step.body_json);
+  const m = media ?? step.media;
   switch (step.payload_type) {
     case 'image':
       return { image: mediaBuffer, caption: body.caption ? String(body.caption) : undefined };
@@ -283,9 +347,9 @@ function contentFromStep(step, mediaBuffer) {
       return {
         audio: mediaBuffer,
         ptt: true,
-        mimetype: step.media?.mimetype || 'audio/ogg; codecs=opus',
-        seconds: step.media?.duration_seconds || undefined,
-        waveform: waveformBuffer(step.media?.waveform_json),
+        mimetype: m?.mimetype || 'audio/ogg; codecs=opus',
+        seconds: m?.duration_seconds || undefined,
+        waveform: waveformBuffer(m?.waveform_json),
       };
     case 'poll':
       return { poll: body.poll };

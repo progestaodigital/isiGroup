@@ -278,6 +278,10 @@ export type ScheduleKind = "once" | "recurring";
 // Filtro opcional de paridade da semana ISO (recorrentes). null = toda semana.
 export type WeekParity = "odd" | "even";
 
+// Recorrente variável: como o motor escolhe a opção de cada disparo.
+// "single" = uma opção só (comportamento de sempre).
+export type VariantMode = "single" | "random" | "sequential";
+
 export interface ScheduleRow {
   id: number;
   name: string | null;
@@ -292,6 +296,10 @@ export interface ScheduleRow {
   recur_week_mod: number | null; // 2 = filtro de paridade ativo; null = toda semana
   recur_week_rem: number | null; // 1 = semanas ímpares, 0 = pares
   last_run_at: string | null;
+  // Recorrente variável: quantas opções de mensagem e qual saiu no último disparo.
+  variant_mode: VariantMode | null;
+  variant_count: number | null;
+  variant_current: number | null;
   total: number;
   sent: number | null;
   failed: number | null;
@@ -305,7 +313,8 @@ export type StepType = "text" | "image" | "audio" | "video" | "poll";
 export interface ApiStep {
   type: StepType;
   text?: string; // corpo do texto OU legenda (imagem/vídeo)
-  media?: MediaInfo;
+  media?: MediaInfo; // uma mídia (formato antigo; o motor ainda aceita)
+  medias?: MediaInfo[]; // Keymaker: rodízio — o motor alterna, 1 sorteio por grupo
   poll?: PollSpec;
 }
 
@@ -333,7 +342,11 @@ export interface NewSchedule {
   content_mode: "broadcast" | "per_target";
   payload_type: PayloadType;
   default_text?: string;
-  steps?: ApiStep[]; // sequência multi-formato (broadcast)
+  steps?: ApiStep[]; // sequência multi-formato (broadcast) — uma opção
+  // Recorrente variável: várias opções de mensagem para o mesmo dia/horário.
+  // O motor escolhe UMA por disparo e uma diferente no disparo seguinte.
+  options?: Array<{ steps: ApiStep[] }>;
+  variant_mode?: Exclude<VariantMode, "single">;
   step_min_s?: number;
   step_max_s?: number;
   media?: MediaInfo;
@@ -368,7 +381,9 @@ export type ActionType = "group_message" | "dm" | "remove" | "webhook" | "delete
 export interface StoredStep {
   payload_type?: string;
   body_json?: string;
-  media?: MediaInfo | null;
+  media?: MediaInfo | null; // = medias[0]
+  medias?: MediaInfo[];
+  option_index?: number; // opção a que o passo pertence (recorrente variável)
 }
 export interface RuleAction {
   action_type: ActionType;
@@ -458,6 +473,25 @@ export async function uploadMedia(file: File): Promise<MediaInfo> {
   return media as MediaInfo;
 }
 
+// --- Keymaker: contagem de combinações + amostras -------------------------
+// `scope` muda só as variáveis disponíveis: em automação existe uma pessoa
+// ({{nome}}), num broadcast de grupo não.
+export interface SpinPreview {
+  ok: boolean;
+  total: number;
+  errors: string[];
+  warnings: string[];
+  variables: string[];
+  samples: string[];
+}
+
+export const spinPreview = (text: string, scope: "broadcast" | "automation" = "broadcast", n = 3) =>
+  sidecar<SpinPreview>("/spin/preview", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text, scope, n }),
+  });
+
 export const createSchedule = (s: NewSchedule) =>
   sidecar<{ id: number }>("/schedules", {
     method: "POST",
@@ -480,8 +514,12 @@ export interface ScheduleDetail {
     step_min_s: number | null;
     step_max_s: number | null;
     account_ids: number[];
+    variant_mode: VariantMode | null;
+    variant_count: number | null;
+    variant_current: number | null;
   };
-  steps: StoredStep[];
+  steps: StoredStep[]; // = options[0] (compatibilidade)
+  options?: StoredStep[][]; // passos agrupados por opção
   targets: Array<{
     target_id: number;
     jid: string;

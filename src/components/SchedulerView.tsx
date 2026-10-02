@@ -34,6 +34,11 @@ const STATUS: Record<string, { label: string; cls: string }> = {
 };
 
 const DOW = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
+
+// Tipo de disparo na tela. "variable" = recorrente com varias opcoes de
+// mensagem (o motor grava kind='recurring' + variant_mode).
+type UiKind = "once" | "recurring" | "variable";
+const MAX_OPCOES = 10;
 const TYPE_LABEL: Record<string, string> = {
   text: "Texto",
   image: "Imagem",
@@ -182,6 +187,11 @@ function ScheduleList({
                   {s.skipped ? `, ${s.skipped} pulado(s)` : ""}
                   {s.chips ? ` · chips: ${s.chips}` : ""}
                   {recurring && s.last_run_at ? ` · último: ${s.last_run_at}` : ""}
+                  {(s.variant_count ?? 1) > 1
+                    ? ` · ${s.variant_count} opções${
+                        s.variant_current != null ? ` (saiu a ${s.variant_current + 1})` : ""
+                      }`
+                    : ""}
                 </div>
               </div>
               <div className="tags">
@@ -227,7 +237,15 @@ function ScheduleForm({
   const [name, setName] = useState(
     editing ? `${editing.schedule.name ?? "Sem título"}${dup ? " (cópia)" : ""}` : ""
   );
-  const [kind, setKind] = useState<ScheduleKind>(editing?.schedule.kind ?? "once");
+  // Tipo de disparo NA TELA: "variable" e recorrente com varias opcoes de
+  // mensagem. No motor nao existe kind novo — grava kind='recurring' +
+  // variant_mode, porque um terceiro kind vazaria para toda query que filtra
+  // por kind (tickOnce/tickRecurring, exportador, planos, MCP).
+  const editVariant = (editing?.schedule.variant_count ?? 1) > 1;
+  const [uiKind, setUiKind] = useState<UiKind>(
+    editing ? (editing.schedule.kind === "recurring" ? (editVariant ? "variable" : "recurring") : "once") : "once"
+  );
+  const kind: ScheduleKind = uiKind === "once" ? "once" : "recurring";
   // Na cópia de um disparo único a data fica em branco de propósito: a do
   // original já passou, e escolher a nova é uma decisão consciente.
   const [when, setWhen] = useState(
@@ -239,9 +257,26 @@ function ScheduleForm({
   const [parity, setParity] = useState<WeekParity | "">(editing?.schedule.recur_week_parity ?? "");
   const [mode, setMode] = useState<"broadcast" | "per_target">(editing?.schedule.content_mode ?? "broadcast");
 
-  const [steps, setSteps] = useState<StepDraft[]>(
-    editing && editing.steps.length ? editing.steps.map(draftFromStored) : [newStep()]
+  // Passos POR OPCAO. Com uma opcao (o caso normal), `options[0]` e a
+  // sequencia de sempre e o payload enviado e identico ao de antes.
+  const [options, setOptions] = useState<StepDraft[][]>(() => {
+    const fromDetail = editing?.options?.length
+      ? editing.options
+      : editing?.steps?.length
+        ? [editing.steps]
+        : null;
+    if (!fromDetail) return [[newStep()]];
+    return fromDetail.map((list) => (list.length ? list.map(draftFromStored) : [newStep()]));
+  });
+  const [activeOpt, setActiveOpt] = useState(0);
+  const [variantMode, setVariantMode] = useState<"random" | "sequential">(
+    editing?.schedule.variant_mode === "sequential" ? "sequential" : "random"
   );
+
+  // A opcao em edicao se comporta como a lista de passos de antes.
+  const steps = options[activeOpt] ?? options[0] ?? [];
+  const setSteps = (updater: (a: StepDraft[]) => StepDraft[]) =>
+    setOptions((prev) => prev.map((o, i) => (i === activeOpt ? updater(o) : o)));
   const [intMin, setIntMin] = useState(ivMin?.value || 1);
   const [intMax, setIntMax] = useState(ivMax?.value || (ivMin?.value || 3));
   const [intUnit, setIntUnit] = useState<"s" | "min">(ivMin && ivMin.value ? ivMin.unit : "min");
@@ -278,7 +313,7 @@ function ScheduleForm({
     return [...seen.values()];
   }, [visibleTargets]);
   const selectedTargets = useMemo(() => groups.filter((t) => selected.has(t.id)), [groups, selected]);
-  const uploadingAny = steps.some((s) => s.uploading);
+  const uploadingAny = options.some((o) => o.some((s) => s.uploading));
 
   // Ao editar: reconstrói a seleção de grupos + textos por grupo assim que a
   // lista de grupos estiver pronta (mapeando pelos jids salvos no agendamento).
@@ -353,6 +388,17 @@ function ScheduleForm({
     setErr(null);
     if (kind === "once" && !when) return setErr("Defina data e hora.");
     if (kind === "recurring" && !time) return setErr("Defina o horário.");
+    if (uiKind !== "variable" && options.length > 1) {
+      return setErr('Várias opções de mensagem só valem no "Recorrente variável".');
+    }
+    if (uiKind === "variable" && options.length < 2) {
+      return setErr("O recorrente variável precisa de pelo menos 2 opções de mensagem.");
+    }
+    // "Mensagem por grupo" não tem opções (o texto é por destino): salvar assim
+    // descartaria as opções em silêncio.
+    if (uiKind === "variable" && mode === "per_target") {
+      return setErr('O recorrente variável não combina com "Mensagem por grupo" — escolha um dos dois.');
+    }
     if (selected.size === 0) return setErr("Selecione ao menos um grupo.");
 
     if (multiChip && selectedChips.size === 0) return setErr("Selecione ao menos um chip.");
@@ -382,19 +428,34 @@ function ScheduleForm({
           targets: built,
         });
       } else {
-        const apiSteps: ApiStep[] = [];
-        for (const s of steps) {
-          const r = stepDraftToApi(s);
-          if ("error" in r) return setErr(r.error);
-          apiSteps.push(r);
+        // Converte cada opcao; a primeira define o tipo exibido na lista.
+        const apiOptions: ApiStep[][] = [];
+        for (const [oi, opt] of options.entries()) {
+          const apiSteps: ApiStep[] = [];
+          for (const s of opt) {
+            const r = stepDraftToApi(s);
+            if ("error" in r) {
+              return setErr(options.length > 1 ? `Opção ${oi + 1}: ${r.error}` : r.error);
+            }
+            apiSteps.push(r);
+          }
+          apiOptions.push(apiSteps);
         }
+        const primeira = apiOptions[0];
+        const temSequencia = apiOptions.some((o) => o.length > 1);
+        // Uma opcao: manda `steps` (payload identico ao de antes). Varias:
+        // manda `options` + variant_mode (recorrente variavel).
+        const conteudo =
+          apiOptions.length > 1
+            ? { options: apiOptions.map((steps) => ({ steps })), variant_mode: variantMode }
+            : { steps: primeira };
         await save({
           ...base,
           content_mode: "broadcast",
-          payload_type: apiSteps.length > 1 ? "sequence" : (apiSteps[0].type as PayloadType),
-          steps: apiSteps,
-          step_min_s: apiSteps.length > 1 ? Math.round(intMin * factor) : undefined,
-          step_max_s: apiSteps.length > 1 ? Math.round(intMax * factor) : undefined,
+          payload_type: primeira.length > 1 ? "sequence" : (primeira[0].type as PayloadType),
+          ...conteudo,
+          step_min_s: temSequencia ? Math.round(intMin * factor) : undefined,
+          step_max_s: temSequencia ? Math.round(intMax * factor) : undefined,
           targets: built,
         });
       }
@@ -404,6 +465,51 @@ function ScheduleForm({
     } finally {
       setBusy(false);
     }
+  }
+
+  // Copia profunda de uma opcao (chaves novas: `key` identifica o passo na UI).
+  const cloneOption = (o: StepDraft[]): StepDraft[] =>
+    o.map((st) => ({
+      ...st,
+      key: crypto.randomUUID(),
+      medias: [...st.medias],
+      mediaNames: [...st.mediaNames],
+      options: [...st.options],
+    }));
+
+  // Troca o tipo de disparo. Entrando no variavel, a 2a opcao nasce como copia
+  // da 1a — o caso real e "5 variacoes da mesma promocao", nao 5 do zero.
+  // Saindo dele, confirma antes de descartar as opcoes extras.
+  function trocarTipo(next: UiKind) {
+    if (next === uiKind) return;
+    if (next === "variable" && options.length < 2) {
+      setOptions((prev) => [...prev, cloneOption(prev[0] ?? [newStep()])]);
+      setActiveOpt(1);
+    }
+    if (next !== "variable" && options.length > 1) {
+      const ok = window.confirm(
+        `Isto descarta as opções 2 a ${options.length}, mantendo só a primeira. Continuar?`
+      );
+      if (!ok) return;
+      setOptions((prev) => [prev[0]]);
+      setActiveOpt(0);
+    }
+    setUiKind(next);
+  }
+
+  function addOption(copiar: boolean) {
+    if (options.length >= MAX_OPCOES) {
+      setErr(`Máximo de ${MAX_OPCOES} opções de mensagem.`);
+      return;
+    }
+    setOptions((prev) => [...prev, copiar ? cloneOption(prev[activeOpt] ?? prev[0]) : [newStep()]]);
+    setActiveOpt(options.length);
+  }
+
+  function removeOption(i: number) {
+    if (options.length <= 1) return;
+    setOptions((prev) => prev.filter((_, j) => j !== i));
+    setActiveOpt((cur) => (cur >= i && cur > 0 ? cur - 1 : cur));
   }
 
   return (
@@ -422,9 +528,24 @@ function ScheduleForm({
       <div className="field">
         <span>Tipo de disparo</span>
         <div className="seg">
-          <button type="button" className={kind === "once" ? "on" : ""} disabled={editando} onClick={() => setKind("once")}>Único</button>
-          <button type="button" className={kind === "recurring" ? "on" : ""} disabled={editando} onClick={() => setKind("recurring")}>Recorrente (semanal)</button>
+          <button type="button" className={uiKind === "once" ? "on" : ""} disabled={editando} onClick={() => trocarTipo("once")}>Único</button>
+          <button type="button" className={uiKind === "recurring" ? "on" : ""} disabled={editando} onClick={() => trocarTipo("recurring")}>Recorrente (semanal)</button>
+          <button
+            type="button"
+            className={uiKind === "variable" ? "on" : ""}
+            disabled={editando || !isPro}
+            title={isPro ? "Várias mensagens para o mesmo horário; o app escolhe uma por disparo" : "Recurso do plano Pro"}
+            onClick={() => trocarTipo("variable")}
+          >
+            Recorrente variável{!isPro ? " (Pro)" : ""}
+          </button>
         </div>
+        {uiKind === "variable" && (
+          <span className="hint">
+            Cadastre várias opções de mensagem para o mesmo dia e horário. A cada disparo o app escolhe
+            uma, e no disparo seguinte uma diferente.
+          </span>
+        )}
         {editando && <span className="hint">O tipo de disparo não muda na edição — crie um novo para trocar.</span>}
       </div>
 
@@ -469,12 +590,60 @@ function ScheduleForm({
         </div>
       </div>
 
-      {/* BROADCAST: editor de passos multi-formato */}
+      {/* BROADCAST: editor de passos multi-formato, por opcao de mensagem */}
       {mode === "broadcast" && (
         <div className="field">
-          <span>Sequência de mensagens</span>
-          <span className="hint">Cada mensagem pode ser de um tipo diferente. São enviadas em ordem, com intervalo entre elas.</span>
+          <span>
+            {options.length > 1 ? `Opções de mensagem (${options.length})` : "Sequência de mensagens"}
+          </span>
+          <span className="hint">
+            Cada mensagem pode ser de um tipo diferente. São enviadas em ordem, com intervalo entre elas.
+            {options.length > 1 && " Cada opção é uma sequência completa — o app envia UMA delas por disparo."}
+          </span>
+
+          {/* Abas de opcao. Grupos e chips ficam fora: sao do agendamento. */}
+          {(options.length > 1 || uiKind === "variable") && (
+            <div className="opt-tabs">
+              {options.map((opt, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  className={i === activeOpt ? "on" : ""}
+                  onClick={() => setActiveOpt(i)}
+                >
+                  Opção {i + 1}
+                  <span className="muted small"> · {opt.length} msg</span>
+                  {editing?.schedule.variant_current === i && <span className="tag mini"> última</span>}
+                </button>
+              ))}
+              {isPro && options.length < MAX_OPCOES && (
+                <>
+                  <button type="button" className="link" onClick={() => addOption(false)}>+ opção</button>
+                  <button type="button" className="link" onClick={() => addOption(true)} title="Cria uma opção com o mesmo conteúdo, para você só ajustar">
+                    duplicar
+                  </button>
+                </>
+              )}
+              {options.length > 1 && (
+                <button type="button" className="link subtle danger" onClick={() => removeOption(activeOpt)}>
+                  remover opção {activeOpt + 1}
+                </button>
+              )}
+            </div>
+          )}
+
+          {options.length > 1 && (
+            <div className="recur-row">
+              <span className="hint">Como escolher a opção de cada disparo:</span>
+              <select value={variantMode} onChange={(e) => setVariantMode(e.currentTarget.value as "random" | "sequential")}>
+                <option value="random">Sortear sem repetir</option>
+                <option value="sequential">Em ordem (1, 2, 3…)</option>
+              </select>
+            </div>
+          )}
+
           <StepSequenceEditor
+            key={activeOpt}
             steps={steps}
             setSteps={setSteps}
             intMin={intMin}
@@ -483,6 +652,8 @@ function ScheduleForm({
             setIntMin={setIntMin}
             setIntMax={setIntMax}
             setIntUnit={setIntUnit}
+            scope="broadcast"
+            isPro={isPro}
           />
         </div>
       )}
