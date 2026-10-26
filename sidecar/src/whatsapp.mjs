@@ -352,6 +352,8 @@ export function createWhatsApp(db, sessionRootDir) {
     accountPromoteParticipants: (id, jid, ps) => getSession(id).promoteParticipants(jid, ps),
     accountDemoteParticipants: (id, jid, ps) => getSession(id).demoteParticipants(jid, ps),
     accountGroupParticipants: (id, jid) => getSession(id).groupParticipants(jid),
+    accountGroupMetadata: (id, jid) => getSession(id).groupMetadata(jid),
+    accountGroupInviteCode: (id, jid) => getSession(id).groupInviteCode(jid),
     accountResolveGroupMembers: (id, jid, phones) => getSession(id).resolveGroupMembers(jid, phones),
     accountSetSubject: (id, jid, s) => getSession(id).setSubject(jid, s),
     accountSetDescription: (id, jid, d) => getSession(id).setDescription(jid, d),
@@ -365,6 +367,14 @@ export function createWhatsApp(db, sessionRootDir) {
       const rows = db
         .prepare('SELECT account_id FROM targets WHERE jid = ? AND is_admin = 1 ORDER BY account_id')
         .all(jid);
+      for (const r of rows) {
+        if (r.account_id && getSession(r.account_id).isConnected()) return r.account_id;
+      }
+      return null;
+    },
+    // Menor chip CONECTADO membro do grupo (le metadata; nao precisa ser admin).
+    memberAccountForGroup: (jid) => {
+      const rows = db.prepare('SELECT DISTINCT account_id FROM targets WHERE jid = ? ORDER BY account_id').all(jid);
       for (const r of rows) {
         if (r.account_id && getSession(r.account_id).isConnected()) return r.account_id;
       }
@@ -778,6 +788,7 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
         // Grupo "so admins enviam": membro comum nao consegue postar.
         announce: g.announce ? 1 : 0,
         last_synced_at: now,
+        member_count: participants.length || (Number.isInteger(g.size) ? g.size : null),
       });
     }
 
@@ -843,6 +854,9 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
         });
       }
       if (!suspectEmpty) deleteTargetsByIds(db, staleIds);
+      // Tamanho do grupo (redirecionamento isiLink). A lista completa de
+      // participantes ja veio no fetch — de graca.
+      for (const r of rows) if (r.member_count != null) saveMemberCount(db, r.jid, r.member_count, now);
       db.exec('COMMIT;');
     } catch (e) {
       db.exec('ROLLBACK;');
@@ -950,6 +964,17 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
     if (!isConnected()) throw new Error('WhatsApp nao conectado');
     return sock.groupParticipantsUpdate(jid, participants, 'demote');
   }
+  // Metadata atual do grupo (tamanho real, para o redirecionamento isiLink).
+  async function groupMetadata(jid) {
+    if (!isConnected()) throw new Error('WhatsApp nao conectado');
+    return sock.groupMetadata(jid);
+  }
+  // Codigo do link de convite (https://chat.whatsapp.com/<codigo>). Exige admin.
+  async function groupInviteCode(jid) {
+    if (!isConnected()) throw new Error('WhatsApp nao conectado');
+    return sock.groupInviteCode(jid);
+  }
+
   // Participantes atuais do grupo (para mapear telefone -> id do membro).
   async function groupParticipants(jid) {
     if (!isConnected()) throw new Error('WhatsApp nao conectado');
@@ -1106,7 +1131,7 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
     start, logout, getState, syncTargets, sendContent, isConnected,
     replyText, sendDirect, removeParticipant, isParticipantAdmin, deleteMessage,
     createGroup, addParticipants, promoteParticipants, demoteParticipants, groupParticipants,
-    resolveGroupMembers,
+    resolveGroupMembers, groupMetadata, groupInviteCode,
     setSubject, setDescription, setGroupPicture, setGroupSetting, setMemberAddMode,
     setJoinApproval, onWhatsApp,
   };
@@ -1132,6 +1157,14 @@ function migrateLegacySession(root) {
     }
     console.error('[wa] sessao legada migrada -> wa-session/1/');
   }
+}
+
+// Grava o tamanho do grupo (tabela group_info, independente de chip).
+export function saveMemberCount(db, jid, count, at = new Date().toISOString()) {
+  db.prepare(
+    `INSERT INTO group_info (jid, member_count, count_at) VALUES (?,?,?)
+     ON CONFLICT(jid) DO UPDATE SET member_count = excluded.member_count, count_at = excluded.count_at`
+  ).run(jid, count, at);
 }
 
 // Garante ao menos uma conta (id=1 em instalacao nova) para o fluxo primario.

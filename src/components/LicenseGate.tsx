@@ -6,6 +6,7 @@ import {
   revalidateLicense,
   submitLicenseKey,
 } from "../lib/api";
+import { BrandIcon, BrandLogo } from "./Brand";
 
 interface Props {
   license: LicenseState;
@@ -95,8 +96,8 @@ export function LicenseGate({ license, onChange }: Props) {
   return (
     <div className="screen center">
       <div className="card gate">
-        <img src="/logo.png" className="brand-logo" alt="isigroup" />
-        <div className="brand-mark">isigroup</div>
+        <BrandIcon />
+        <BrandLogo size={36} />
         <h1>{copy.title}</h1>
         <p className="muted">{copy.body}</p>
 
@@ -114,7 +115,7 @@ export function LicenseGate({ license, onChange }: Props) {
               value={key}
               onChange={(e) => setKey(e.currentTarget.value)}
             />
-            <button type="submit" disabled={busy || key.trim().length < 19}>
+            <button type="submit" className="cta" disabled={busy || key.trim().length < 19}>
               {busy ? "Validando…" : "Ativar"}
             </button>
           </form>

@@ -8,17 +8,22 @@ import {
   Rule,
   Target,
   TriggerType,
+  IsilinkLink,
+  createIsilink,
   createRule,
   deleteRule,
   listAccounts,
+  listIsilinks,
   listAutoLogs,
   listRules,
   listTargets,
   toggleRule,
+  updateIsilink,
   updateRule,
 } from "../lib/api";
 import { StepDraft, StepSequenceEditor, draftFromStored, newStep, stepDraftToApi } from "./StepEditor";
 import { usePager, Pager } from "./Pager";
+import { IsilinkFields, IsilinkRow, isilinkDraft, isilinkPayload } from "./Isilink";
 import type { RuleAction } from "../lib/api";
 type RuleActionConfig = RuleAction["config"];
 
@@ -28,6 +33,12 @@ const TRIGGER_LABEL: Record<TriggerType, string> = {
   join: "Entrou no grupo",
   leave: "Saiu do grupo",
 };
+// "Grupo lotado" (redirecionamento isiLink) é gatilho só no formulário: é
+// guardado à parte (/isilink/*), porque não tem ações — o efeito é avisar o isiLink.
+type FormTrigger = TriggerType | "group_full";
+const FORM_TRIGGERS: FormTrigger[] = ["message", "message_link", "join", "leave", "group_full"];
+const FORM_TRIGGER_LABEL: Record<FormTrigger, string> = { ...TRIGGER_LABEL, group_full: "Grupo lotado" };
+
 const MATCH_LABEL: Record<MatchType, string> = {
   starts_with: "começa com",
   contains: "contém",
@@ -43,7 +54,7 @@ const ACTION_LABEL: Record<ActionType, string> = {
 };
 
 // "Apagar mensagem" só existe para gatilhos de mensagem (join/leave não têm o que apagar).
-function actionTypesFor(trigger: TriggerType): ActionType[] {
+function actionTypesFor(trigger: FormTrigger): ActionType[] {
   const base: ActionType[] = ["group_message", "dm", "remove"];
   if (trigger === "message" || trigger === "message_link") base.push("delete_message");
   base.push("webhook");
@@ -53,15 +64,22 @@ function actionTypesFor(trigger: TriggerType): ActionType[] {
 export function AutomationView({ isPro }: { isPro: boolean }) {
   const [targets, setTargets] = useState<Target[]>([]);
   const [rules, setRules] = useState<Rule[]>([]);
+  const [links, setLinks] = useState<IsilinkLink[]>([]);
   const [logs, setLogs] = useState<AutoLog[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<Rule | null>(null);
+  const [editingLink, setEditingLink] = useState<IsilinkLink | null>(null);
 
   const refresh = useCallback(async () => {
-    const [r, l] = await Promise.all([listRules(), listAutoLogs()]);
+    const [r, l, il] = await Promise.all([
+      listRules(),
+      listAutoLogs(),
+      isPro ? listIsilinks().catch(() => null) : Promise.resolve(null),
+    ]);
     setRules(r.rules);
     setLogs(l.logs);
-  }, []);
+    setLinks(il?.links ?? []);
+  }, [isPro]);
 
   useEffect(() => {
     listTargets().then((r) => setTargets(r.targets));
@@ -86,24 +104,35 @@ export function AutomationView({ isPro }: { isPro: boolean }) {
           <h1>Automações & Gatilhos</h1>
           <p className="muted">Quando um gatilho acontece, execute ações automaticamente.</p>
         </div>
-        <button onClick={() => { setEditing(null); setShowForm((v) => !v); }}>{showForm && !editing ? "Fechar" : "Nova automação"}</button>
+        <button onClick={() => { const novo = !!(editing || editingLink); setEditing(null); setEditingLink(null); setShowForm((v) => !v || novo); }}>
+          {showForm && !editing && !editingLink ? "Fechar" : "Nova automação"}
+        </button>
       </div>
 
       {showForm && (
         <RuleForm
-          key={editing?.id ?? "new"}
+          key={editing ? `r${editing.id}` : editingLink ? `l${editingLink.id}` : "new"}
           targets={targets}
           isPro={isPro}
           editing={editing}
-          onCreated={() => { setShowForm(false); setEditing(null); refresh(); }}
+          editingLink={editingLink}
+          onCreated={() => { setShowForm(false); setEditing(null); setEditingLink(null); refresh(); }}
         />
       )}
 
       <h2 className="section-title">Automações</h2>
-      {rules.length === 0 ? (
+      {rules.length === 0 && links.length === 0 ? (
         <div className="card empty"><p className="muted">Nenhuma automação ainda.</p></div>
       ) : (
         <div className="list">
+          {links.map((l) => (
+            <IsilinkRow
+              key={`l${l.id}`}
+              link={l}
+              onEdit={() => { setEditing(null); setEditingLink(l); setShowForm(true); }}
+              onChanged={refresh}
+            />
+          ))}
           {rulesP.slice.map((r) => (
             <div key={r.id} className="row-item">
               <div>
@@ -118,7 +147,7 @@ export function AutomationView({ isPro }: { isPro: boolean }) {
               </div>
               <div className="tags">
                 <span className={`tag ${r.enabled ? "ok" : "off"}`}>{r.enabled ? "Ativa" : "Pausada"}</span>
-                <button className="link subtle" onClick={() => { setEditing(r); setShowForm(true); }}>Editar</button>
+                <button className="link subtle" onClick={() => { setEditingLink(null); setEditing(r); setShowForm(true); }}>Editar</button>
                 <button className="link subtle" onClick={async () => { await toggleRule(r.id); refresh(); }}>{r.enabled ? "Pausar" : "Ativar"}</button>
                 <button className="link subtle danger" onClick={async () => { if (confirm("Apagar esta automação?")) { await deleteRule(r.id); refresh(); } }}>Apagar</button>
               </div>
@@ -209,9 +238,10 @@ function actionToDraft(a: { action_type: ActionType; config: RuleActionConfig })
   return d;
 }
 
-function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; isPro: boolean; editing?: Rule | null; onCreated: () => void }) {
-  const [name, setName] = useState(editing?.name ?? "");
-  const [trigger, setTrigger] = useState<TriggerType>(editing?.trigger_type ?? "message");
+function RuleForm({ targets, isPro, editing, editingLink, onCreated }: { targets: Target[]; isPro: boolean; editing?: Rule | null; editingLink?: IsilinkLink | null; onCreated: () => void }) {
+  const [name, setName] = useState(editing?.name ?? editingLink?.name ?? "");
+  const [trigger, setTrigger] = useState<FormTrigger>(editingLink ? "group_full" : editing?.trigger_type ?? "message");
+  const [isilink, setIsilink] = useState(() => isilinkDraft(editingLink));
   const [matchType, setMatchType] = useState<MatchType>(editing?.match_type ?? "contains");
   const [pattern, setPattern] = useState(editing?.pattern ?? "");
   const [caseSensitive, setCaseSensitive] = useState(!!editing?.case_sensitive);
@@ -232,7 +262,7 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
 
   // Troca o gatilho; ao sair de gatilho de mensagem, converte ações "apagar
   // mensagem" (sem sentido em join/leave) para "mensagem no grupo".
-  function chooseTrigger(t: TriggerType) {
+  function chooseTrigger(t: FormTrigger) {
     setTrigger(t);
     if (t !== "message" && t !== "message_link") {
       setActions((arr) => arr.map((a) => (a.type === "delete_message" ? { ...a, type: "group_message" } : a)));
@@ -255,6 +285,26 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
     e.preventDefault();
     setErr(null);
     if (!name.trim()) return setErr("Dê um nome à automação.");
+
+    // Grupo lotado: redirecionamento isiLink (guardado à parte, sem ações).
+    if (trigger === "group_full") {
+      const p = isilinkPayload(name.trim(), isilink);
+      if ("error" in p) return setErr(p.error);
+      const removed = editingLink ? editingLink.groups.filter((g) => !p.groups.includes(g.jid) && g.status) : [];
+      if (removed.length && !confirm(`${removed.length} grupo(s) retirado(s) serão fechados no isiLink ("ativo": "não"). Continuar?`)) return;
+      setBusy(true);
+      try {
+        if (editingLink) await updateIsilink(editingLink.id, p);
+        else await createIsilink(p);
+        onCreated();
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
     if (trigger === "message" && !pattern.trim()) return setErr("Defina o texto do gatilho.");
     if (scope.size === 0) return setErr("Selecione ao menos um grupo.");
     if (actions.length === 0) return setErr("Adicione ao menos uma ação.");
@@ -292,7 +342,7 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
 
     const payload = {
       name: name.trim(),
-      trigger_type: trigger,
+      trigger_type: trigger as TriggerType,
       match_type: trigger === "message" ? matchType : undefined,
       pattern: trigger === "message" ? pattern : undefined,
       case_sensitive: caseSensitive,
@@ -323,12 +373,27 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
       <div className="field">
         <span>Gatilho — quando…</span>
         <div className="seg">
-          {(["message", "message_link", "join", "leave"] as TriggerType[]).map((t) => (
-            <button key={t} type="button" className={trigger === t ? "on" : ""} onClick={() => chooseTrigger(t)}>{TRIGGER_LABEL[t]}</button>
-          ))}
+          {FORM_TRIGGERS.map((t) => {
+            // Uma regra salva não vira redirecionamento (e vice-versa): ficam guardados em lugares diferentes.
+            const locked = (!!editing && t === "group_full") || (!!editingLink && t !== "group_full") || (t === "group_full" && !isPro);
+            return (
+              <button key={t} type="button" className={trigger === t ? "on" : ""} disabled={locked} onClick={() => chooseTrigger(t)}>
+                {FORM_TRIGGER_LABEL[t]}{t === "group_full" && !isPro ? " (Pro)" : ""}
+              </button>
+            );
+          })}
         </div>
         {trigger === "message_link" && <span className="hint">Dispara quando a mensagem contém qualquer link (http, www ou domínio).</span>}
+        {trigger === "group_full" && (
+          <span className="hint">
+            Redirecionamento <b>isiLink</b>: quando um grupo lota, ele é fechado no link do isiLink e os cliques vão para o próximo grupo aberto da fila. Quando esvazia, reabre.
+          </span>
+        )}
       </div>
+
+      {trigger === "group_full" && (
+        <IsilinkFields draft={isilink} setDraft={setIsilink} targets={targets} editing={editingLink ?? null} />
+      )}
 
       {trigger === "message" && (
         <div className="field-row">
@@ -352,6 +417,7 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
         </label>
       )}
 
+      {trigger !== "group_full" && (<>
       <div className="field">
         <span>Em quais grupos ({scope.size} selecionado{scope.size === 1 ? "" : "s"})</span>
         {targets.length === 0 ? (
@@ -447,6 +513,7 @@ function RuleForm({ targets, isPro, editing, onCreated }: { targets: Target[]; i
         ))}
         <button type="button" className="link" onClick={() => setActions((a) => [...a, newAction()])}>+ Adicionar ação</button>
       </div>
+      </>)}
 
       {err && <p className="error">{err}</p>}
       <div className="gate-actions" style={{ justifyContent: "flex-start" }}>

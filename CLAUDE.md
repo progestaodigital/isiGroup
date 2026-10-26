@@ -31,6 +31,7 @@ pnpm tauri build             # build de produção (instalador NSIS); assina se 
   node smoke/routes.mjs           # sobe o sidecar num DB temporário e bate nas rotas
   node smoke/dispatch.mjs         # roda o scheduler contra um `wa` falso (disparo por grupo)
   node smoke/automation.mjs       # dispara um gatilho de verdade (variáveis, rodízio)
+  node smoke/isilink.mjs          # redirecionamento isiLink contra wa falso + isiLink falso (HTTP local)
   ```
   Fora disso **não há suíte**. Verificação = `node --check <arquivo.mjs>` para sintaxe + smoke manual: subir o sidecar contra um DB temporário e bater nos endpoints.
   ```bash
@@ -74,7 +75,8 @@ que controla o **gating** dos recursos Pro **no motor** (não só na UI). São P
 grupo onde não é admin** (`automation.mjs::allowedByEdition`), o **responder de IA**
 (handler em `index.mjs`), e — por um **gate de prefixo de rota** no topo do `route()` —
 **Agentes de IA** (`/ai/*`), **Planos & IA** (`/plans/*`, `/integration*`),
-**Exportar** (`/export*`) e o preview do **Keymaker** (`/spin*`). Além disso,
+**Exportar** (`/export*`), o preview do **Keymaker** (`/spin*`) e o **Redirecionamento
+isiLink** (`/isilink/*`; o motor em `isilink.mjs` também checa a edição). Além disso,
 `createSchedule`/`updateSchedule` recusam com 403 **várias opções de mensagem**
 (recorrente variável) e **várias mídias por mensagem**. O gate de prefixo existe
 porque a UI não é a única porta: a ponte MCP e o executor de planos batem nessas
@@ -95,6 +97,7 @@ modo que a mensagem nunca sai com as chaves cruas.
 - **Mídia é lista, não coluna** (migration 019): `schedule_step_media` (filha de `schedule_steps`) existe porque áudio PTT tem waveform/duração/mimetype **por arquivo**. A mídia 0 é **dual-written** nas colunas `media_*` do passo (rollback do auto-updater ainda enxerga a mídia). Com `PRAGMA foreign_keys = ON`, apagar passos exige apagar as mídias filhas **antes** — vale para `updateSchedule` e `deleteSchedule`.
 - **Recorrente variável** (migration 020): `option_index` em `schedule_steps` agrupa os passos por **opção**; `order_index` segue sendo a ordem dentro da opção. Não existe `kind` novo — grava `kind='recurring'` + `variant_mode`, porque um terceiro kind vazaria para toda query que filtra por kind. A opção sorteada é gravada em `variant_current` **dentro da transação** que marca `last_run_at`/`recur_fired_at` e repõe os alvos; a **retomada do mesmo dia lê** esse valor em vez de sortear, senão o disparo sairia partido em duas mensagens e `seq_step` apontaria para o passo de outra opção.
 - **Webhook** (`webhooks.mjs`): `POST` JSON assinado com HMAC-SHA256 (header `x-isi-signature`), retry com backoff. Payload inclui `chip{account_id,label}`, `group{jid,name}`, `lead{name,phone,jid}`, `message`, `date`/`time`. O telefone do lead vem de `participant.phoneNumber` nos eventos join/leave (Baileys 7 usa `@lid` para participantes — ver gotcha).
+- **Redirecionamento isiLink** (`isilink.mjs`, migration 021): na UI é o gatilho **"Grupo lotado"** de Nova automação (`AutomationView` + `Isilink.tsx`), mas é guardado à parte de `automation_rules` (não tem ações; um `trigger_type` novo vazaria para exportador/planos). Um link do isiLink (método isiGroup) tem uma fila ordenada de grupos; o isiGroup manda `POST {grupo: <URL de convite>, ativo: "sim"|"não"}` (secret em `x-webhook-secret`) quando o grupo chega a `max_members` (fecha) ou cai para `reopen_at` (reabre) — entre os dois mantém o status (histerese). Só envia quando o status muda (`isilink_groups.last_status` = último aceito; `ignored`/plan_limit fica NULL para tentar de novo). Tamanho em `group_info` (independe de chip; gravado na sync e relido via `groupMetadata` com debounce após join/leave — não soma ±1). Convite exige chip **admin**; convite redefinido ⇒ "não" na URL antiga + "sim" na nova (entra no fim da fila). Envios por link são **serializados** (a ordem define a fila do isiLink). Grupo retirado ⇒ "não"; apagar o redirecionamento não mexe no isiLink. 4xx não re-tenta; 5xx/rede re-tenta 3×. Conferência periódica a cada 5 min. Ainda **fora** de Planos/MCP e da Exportação.
 - **Planos (isiplan) & MCP** (`plans.mjs` + `integration.mjs` + `sidecar/mcp.mjs`): plano JSON declarativo importável (grupos por seletor `names`/`match`/`ref` — nunca jid; executor persistente `plan_runs`/`plan_steps` que **delega às filas existentes** e espera jobs bulk p/ resolver `ref`s; guarda de reimportação por hash com confirmação). A ponte MCP é stdio sem SDK, descoberta via `%APPDATA%/isigroup/integration.json` (toggle na aba Planos & IA); ações de risco criam `pending_approvals` que o usuário aprova no app (banner no `MainShell`). Doc completa + prompts: **`PLANOS.md`**.
 
 ## Empacotamento e release (auto-updater assinado)

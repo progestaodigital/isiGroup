@@ -20,6 +20,7 @@ import { ExportView } from "./ExportView";
 import { aplicar, lerPreferencia, salvarPreferencia } from "../lib/privacy";
 import { PlansView } from "./PlansView";
 import { FaqView } from "./FaqView";
+import { BrandLogo } from "./Brand";
 
 interface Props {
   license: LicenseState;
@@ -53,7 +54,7 @@ export function MainShell({ license, onLicenseChange }: Props) {
   return (
     <div className="screen app">
       <aside className="sidebar">
-        <div className="brand-mark small">isigroup</div>
+        <div className="brand-row"><BrandLogo size={26} /></div>
         <nav>
           <button
             className={`nav-item ${view === "overview" ? "active" : ""}`}

@@ -5,10 +5,19 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const READY_MARKER: &str = "__SIDECAR_READY__";
-const READY_TIMEOUT: Duration = Duration::from_secs(20);
+// O grosso do arranque e o import dos modulos (Baileys + deps, milhares de
+// arquivos). Com disco frio (pos-boot, pos-update) ou o antivirus escaneando,
+// isso passava dos 20s antigos e o app ficava preso ate fechar e abrir.
+const READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+enum ReadyEvent {
+    Port(u16),
+    /// stdout fechou antes do marcador: o processo morreu no arranque.
+    Exited,
+}
 
 pub struct SidecarHandle {
     pub port: u16,
@@ -43,7 +52,7 @@ pub fn spawn_sidecar(
         .map_err(|e| format!("falha ao iniciar sidecar (node no PATH?): {e}"))?;
 
     let stdout = child.stdout.take().ok_or("sidecar sem stdout")?;
-    let (tx, rx) = mpsc::channel::<u16>();
+    let (tx, rx) = mpsc::channel::<ReadyEvent>();
 
     // Le stdout: detecta o marcador de porta e repassa demais linhas como log.
     thread::spawn(move || {
@@ -52,13 +61,15 @@ pub fn spawn_sidecar(
             if let Some(rest) = line.strip_prefix(READY_MARKER) {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(rest) {
                     if let Some(p) = v.get("port").and_then(|p| p.as_u64()) {
-                        let _ = tx.send(p as u16);
+                        let _ = tx.send(ReadyEvent::Port(p as u16));
                         continue;
                     }
                 }
             }
             eprintln!("[sidecar] {line}");
         }
+        // Depois do Port o receptor ja foi descartado; o envio so falha calado.
+        let _ = tx.send(ReadyEvent::Exited);
     });
 
     // Drena stderr (warnings do Node, etc.).
@@ -71,11 +82,30 @@ pub fn spawn_sidecar(
         });
     }
 
-    let port = rx
-        .recv_timeout(READY_TIMEOUT)
-        .map_err(|_| "sidecar nao reportou a porta a tempo".to_string())?;
+    let started = Instant::now();
+    let fail = |child: &mut Child, msg: String| {
+        // Mata de fato: so soltar o Child deixaria o Node vivo ate notar o stdin.
+        let _ = child.kill();
+        let _ = child.wait();
+        Err(msg)
+    };
+    let port = match rx.recv_timeout(READY_TIMEOUT) {
+        Ok(ReadyEvent::Port(p)) => p,
+        Ok(ReadyEvent::Exited) => {
+            return fail(&mut child, "sidecar encerrou durante o arranque".to_string())
+        }
+        Err(_) => {
+            return fail(
+                &mut child,
+                format!("sidecar nao reportou a porta em {}s", READY_TIMEOUT.as_secs()),
+            )
+        }
+    };
 
-    eprintln!("[core] sidecar pronto em 127.0.0.1:{port}");
+    eprintln!(
+        "[core] sidecar pronto em 127.0.0.1:{port} ({} ms)",
+        started.elapsed().as_millis()
+    );
     Ok(SidecarHandle {
         port,
         token: token.to_string(),

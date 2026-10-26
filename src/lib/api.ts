@@ -456,6 +456,77 @@ export const deleteRule = (id: number) =>
   sidecar<{ ok?: boolean }>(`/automation/rules/${id}`, { method: "DELETE" });
 export const listAutoLogs = () => sidecar<{ logs: AutoLog[] }>("/automation/logs");
 
+// Redirecionamento isiLink (Pro): avisa o isiLink quando um grupo lota/reabre.
+export type IsilinkStatus = "sim" | "nao";
+export interface IsilinkGroup {
+  jid: string;
+  name: string | null;
+  order_index: number;
+  member_count: number | null;
+  count_at: string | null;
+  invite_url: string | null;
+  status: IsilinkStatus | null; // último status aceito pelo isiLink (null = nunca enviado)
+  last_result: string | null; // activated | deactivated | added | unchanged | ignored | erro
+  last_error: string | null;
+  last_sent_at: string | null;
+}
+export interface IsilinkLink {
+  id: number;
+  name: string;
+  webhook_url: string;
+  secret: string | null;
+  max_members: number;
+  reopen_at: number;
+  enabled: boolean;
+  created_at: string;
+  groups: IsilinkGroup[];
+}
+export interface NewIsilinkLink {
+  name: string;
+  webhook_url: string;
+  secret: string;
+  max_members: number;
+  reopen_at: number;
+  groups: string[]; // jids, na ordem da fila
+}
+export interface IsilinkEvent {
+  id: number;
+  jid: string;
+  invite_url: string;
+  ativo: IsilinkStatus;
+  member_count: number | null;
+  http_status: number | null;
+  result: string;
+  error: string | null;
+  created_at: string;
+}
+
+// Erros 400 do sidecar trazem a mensagem de validação — o helper genérico a perderia.
+async function sidecarWithMessage<T>(path: string, init?: RequestInit): Promise<T> {
+  if (!cachedInfo) cachedInfo = await getSidecarInfo();
+  const res = await fetch(`http://127.0.0.1:${cachedInfo.port}${path}`, {
+    ...init,
+    headers: { "x-isi-token": cachedInfo.token, ...(init?.headers ?? {}) },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.message ?? data?.error ?? `HTTP ${res.status}`);
+  return data as T;
+}
+
+export const listIsilinks = () => sidecar<{ links: IsilinkLink[] }>("/isilink/links");
+export const createIsilink = (l: NewIsilinkLink) =>
+  sidecarWithMessage<{ id: number }>("/isilink/links", { method: "POST", ...jbody(l) });
+export const updateIsilink = (id: number, l: NewIsilinkLink) =>
+  sidecarWithMessage<{ ok: boolean }>(`/isilink/links/${id}`, { method: "PUT", ...jbody(l) });
+export const toggleIsilink = (id: number) =>
+  sidecar<{ enabled: boolean }>(`/isilink/links/${id}/toggle`, { method: "POST" });
+export const resyncIsilink = (id: number) =>
+  sidecar<{ ok: boolean }>(`/isilink/links/${id}/resync`, { method: "POST" });
+export const deleteIsilink = (id: number) =>
+  sidecar<{ ok: boolean }>(`/isilink/links/${id}`, { method: "DELETE" });
+export const listIsilinkEvents = (id: number) =>
+  sidecar<{ events: IsilinkEvent[] }>(`/isilink/links/${id}/events`);
+
 export async function uploadMedia(file: File): Promise<MediaInfo> {
   if (!cachedInfo) cachedInfo = await getSidecarInfo();
   const buf = await file.arrayBuffer();

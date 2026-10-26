@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { LicenseState, getLicenseState } from "./lib/api";
 import { LicenseGate } from "./components/LicenseGate";
 import { MainShell } from "./components/MainShell";
+import { BrandIcon, BrandLogo } from "./components/Brand";
 import "./App.css";
 
 export default function App() {
@@ -31,9 +32,9 @@ export default function App() {
   if (loading || !license || license.status === "loading") {
     return (
       <div className="screen center">
-        <img src="/logo.png" className="brand-logo float-anim" alt="isigroup" />
-        <div className="brand-mark">isigroup</div>
-        <p className="mono">● Iniciando sistema</p>
+        <BrandIcon />
+        <BrandLogo size={40} />
+        <p className="mono badge-ping"><span className="ping" />Iniciando sistema</p>
       </div>
     );
   }

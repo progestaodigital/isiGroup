@@ -145,7 +145,16 @@ pub async fn boot_ping(key: &str, hwid: &str) -> LicenseState {
     };
     for (slug, edition) in PRODUCTS {
         // validate_one ja preenche product_slug e edition (incl. override pelo token).
-        let st = validate_one(key, hwid, slug, edition).await;
+        let mut st = validate_one(key, hwid, slug, edition).await;
+        // O painel as vezes recusa a MESMA requisicao (HTTP 400 malformed_payload)
+        // e aceita logo em seguida: repete antes de mostrar erro na abertura.
+        for _ in 0..2 {
+            if st.status != "server_error" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            st = validate_one(key, hwid, slug, edition).await;
+        }
         match st.status.as_str() {
             "rate_limited" | "network_error" => return st,
             "invalid" => last = st,

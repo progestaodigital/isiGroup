@@ -206,13 +206,26 @@ fn init_background(handle: &tauri::AppHandle) -> Result<(), String> {
 
     let (node_cmd, script) = resolve_sidecar(handle)?;
     eprintln!("[core] node: {node_cmd} | sidecar: {}", script.display());
-    let sc = sidecar::spawn_sidecar(
-        &node_cmd,
-        &script.to_string_lossy(),
-        &db_path.to_string_lossy(),
-        &token,
-    )
-    .map_err(|e| format!("sidecar: {e}"))?;
+    // Falha de arranque costuma ser transitoria (disco frio, antivirus): tenta
+    // de novo antes de desistir, em vez de exigir fechar e abrir o app.
+    const SIDECAR_ATTEMPTS: u32 = 3;
+    let mut attempt = 1;
+    let sc = loop {
+        match sidecar::spawn_sidecar(
+            &node_cmd,
+            &script.to_string_lossy(),
+            &db_path.to_string_lossy(),
+            &token,
+        ) {
+            Ok(sc) => break sc,
+            Err(e) if attempt < SIDECAR_ATTEMPTS => {
+                eprintln!("[core] sidecar tentativa {attempt}/{SIDECAR_ATTEMPTS} falhou: {e}");
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            Err(e) => return Err(format!("sidecar: {e}")),
+        }
+    };
 
     let license_state = match license::load_key() {
         Some(key) => tauri::async_runtime::block_on(license::boot_ping(&key, &hwid)),

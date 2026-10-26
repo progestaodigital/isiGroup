@@ -250,8 +250,8 @@ function ChipCard({
         // hibernacao, Wi-Fi, internet caiu); vermelho quando parou de vez e
         // depende de acao sua.
         <p
-          className="small"
-          style={{ color: account.retrying ? "#d8a200" : "#e05a4f", marginTop: 4 }}
+          className={`small ${account.retrying ? "warn-text" : "err-text"}`}
+          style={{ marginTop: 4 }}
         >
           {account.retrying ? "↻" : "⚠"} {account.last_error}
         </p>

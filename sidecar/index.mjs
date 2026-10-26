@@ -12,6 +12,7 @@ import { createWhatsApp } from './src/whatsapp.mjs';
 import { createScheduler } from './src/scheduler.mjs';
 import { saveUpload } from './src/media.mjs';
 import { createAutomation } from './src/automation.mjs';
+import { createIsilink } from './src/isilink.mjs';
 import { createBulk } from './src/bulk.mjs';
 import { createPlans, schemaDoc } from './src/plans.mjs';
 import { createIntegration } from './src/integration.mjs';
@@ -78,7 +79,18 @@ scheduler.start();
 
 // Automacoes & gatilhos: mensagem + entrada/saida de membros.
 const automation = createAutomation(db, wa, editionState);
-wa.setMembershipHandler(automation.onMembership);
+// Redirecionamento isiLink: acompanha o tamanho dos grupos e avisa o isiLink
+// quando um grupo lota/reabre. Compartilha o handler de entrada/saida.
+const isilink = createIsilink(db, wa, editionState);
+isilink.start();
+wa.setMembershipHandler(async (eventType, info) => {
+  try {
+    isilink.onMembership(eventType, info);
+  } catch (e) {
+    console.error('[isilink] erro no handler:', e?.message);
+  }
+  await automation.onMembership(eventType, info);
+});
 
 // Acoes em massa (bulk): fila propria no SQLite, retomada no arranque.
 const bulk = createBulk(db, wa);
@@ -194,11 +206,12 @@ async function route(req, res, url) {
     path.startsWith('/integration/') ||
     path === '/export' ||
     path.startsWith('/export/') ||
-    path.startsWith('/spin');
+    path.startsWith('/spin') ||
+    path.startsWith('/isilink/');
   if (proOnly && editionState.edition !== 'pro') {
     return json(res, 403, {
       error: 'pro_required',
-      message: 'Agentes de IA, Planos & IA, Exportar e Keymaker sao exclusivos do plano Pro.',
+      message: 'Agentes de IA, Planos & IA, Exportar, Keymaker e Redirecionamento isiLink sao exclusivos do plano Pro.',
     });
   }
 
@@ -430,6 +443,29 @@ async function route(req, res, url) {
   if (method === 'PUT' && ruleUpd) return updateRule(res, Number(ruleUpd[1]), await readJson(req));
   const ruleDel = path.match(/^\/automation\/rules\/(\d+)$/);
   if (method === 'DELETE' && ruleDel) return deleteRule(res, Number(ruleDel[1]));
+
+  // --- Redirecionamento isiLink (Pro; gate de prefixo acima) ---
+  if (match('GET', '/isilink/links')) return json(res, 200, { links: isilink.list() });
+  if (match('POST', '/isilink/links')) {
+    const r = isilink.create(await readJson(req));
+    return r.error ? json(res, 400, { error: 'bad_request', message: r.error }) : json(res, 201, r);
+  }
+  const ilAction = path.match(/^\/isilink\/links\/(\d+)\/(toggle|resync|events)$/);
+  if (ilAction) {
+    const id = Number(ilAction[1]);
+    if (method === 'GET' && ilAction[2] === 'events') return json(res, 200, { events: isilink.events(id) });
+    if (method === 'POST') {
+      const r = ilAction[2] === 'toggle' ? isilink.toggle(id) : ilAction[2] === 'resync' ? await isilink.resync(id) : null;
+      if (r) return r.error ? json(res, r.status ?? 400, { error: r.error }) : json(res, 200, r);
+    }
+  }
+  const ilLink = path.match(/^\/isilink\/links\/(\d+)$/);
+  if (ilLink && method === 'PUT') {
+    const r = isilink.update(Number(ilLink[1]), await readJson(req));
+    if (r.error) return json(res, r.status ?? 400, { error: r.status === 404 ? 'not_found' : 'bad_request', message: r.error });
+    return json(res, 200, r);
+  }
+  if (ilLink && method === 'DELETE') return json(res, 200, isilink.remove(Number(ilLink[1])));
 
   // --- Acoes em massa (bulk) ---
   if (match('POST', '/bulk')) {
