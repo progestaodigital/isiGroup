@@ -1,15 +1,16 @@
 ## Novidades
 
-### Redirecionamento isiLink — gatilho "Grupo lotado" (Pro)
-Em **Automações → Nova automação → Grupo lotado**, escolha os grupos do link, o máximo de membros e com quantos o grupo reabre. Quando um grupo lota, o isiGroup o fecha no seu link do **isiLink** e os cliques passam para o próximo grupo aberto da fila. Quando ele esvazia, reabre sozinho.
+### Categoria e semana dos grupos
+Na tela **Grupos & Comunidades**, cada grupo agora tem uma **categoria** (ex.: "Lar") e uma **semana**: Par, Ímpar ou Ambas. No redirecionamento isiLink, a semana é enviada ao seu link. Com "separar semanas pares e ímpares" ligado no isiLink, os cliques vão para os grupos da semana em vigor. Grupos que já estão na fila recebem a classificação sozinhos, sem precisar reenviar nada.
 
-- Funciona com qualquer quantidade de grupos, na ordem que você definir.
-- Se o link de convite do grupo for redefinido, o isiLink é atualizado automaticamente.
-- Acompanhe o tamanho de cada grupo, o status (aberto/lotado) e cada chamada feita ao isiLink.
-- Requer assinatura ativa do isiLink.
+### Criação automática de grupos (Pro)
+No redirecionamento isiLink, escolha um chip em **Criar grupo novo automaticamente**. Quando todos os grupos de uma subcategoria passam de 60% do máximo, o isiGroup cria o próximo grupo da numeração só daquela subcategoria (ímpar 9 → 11, par 10 → 12). O grupo novo:
 
-### Nova identidade visual
-Logo e ícone novos e telas revisadas.
+- copia a descrição, a foto, as configurações e os chips admin do último grupo;
+- entra nos agendamentos, automações, edições recorrentes e seleções da subcategoria;
+- entra no fim da fila do isiLink, já com a semana.
 
-### Mais estabilidade na abertura
-O app tenta de novo, sozinho, quando o motor interno ou a validação da licença demoram na primeira tentativa. Não é mais preciso fechar e abrir o app.
+São no máximo 5 grupos novos por dia por link. Só os seus chips entram no grupo novo, nunca outras pessoas.
+
+### Grupo exclusivo
+Banner na Visão geral com o convite para o nosso grupo exclusivo.

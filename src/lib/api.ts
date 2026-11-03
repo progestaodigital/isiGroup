@@ -229,7 +229,12 @@ export interface Target {
   type: "group" | "community_announce" | "community_subgroup";
   is_admin: number;
   last_synced_at: string | null;
+  category: string | null;
+  week: GroupWeek | null; // vai ao isiLink no campo "semana"; null = não classificado
 }
+export type GroupWeek = "par" | "impar" | "ambas";
+export const setGroupCategory = (jid: string, category: string, week: GroupWeek | null) =>
+  sidecarWithMessage<{ ok: boolean }>("/targets/category", { method: "PUT", ...jbody({ jid, category, week }) });
 export interface SyncResult {
   synced?: number;
   admin?: number;
@@ -464,9 +469,11 @@ export interface IsilinkGroup {
   order_index: number;
   member_count: number | null;
   count_at: string | null;
+  category: string | null;
+  week: GroupWeek | null;
   invite_url: string | null;
   status: IsilinkStatus | null; // último status aceito pelo isiLink (null = nunca enviado)
-  last_result: string | null; // activated | deactivated | added | unchanged | ignored | erro
+  last_result: string | null; // activated | deactivated | added | unchanged | updated | ignored | erro
   last_error: string | null;
   last_sent_at: string | null;
 }
@@ -477,6 +484,7 @@ export interface IsilinkLink {
   secret: string | null;
   max_members: number;
   reopen_at: number;
+  creator_account_id: number | null; // chip que cria o próximo grupo da subcategoria (null = não cria)
   enabled: boolean;
   created_at: string;
   groups: IsilinkGroup[];
@@ -487,13 +495,14 @@ export interface NewIsilinkLink {
   secret: string;
   max_members: number;
   reopen_at: number;
+  creator_account_id: number | null;
   groups: string[]; // jids, na ordem da fila
 }
 export interface IsilinkEvent {
   id: number;
   jid: string;
   invite_url: string;
-  ativo: IsilinkStatus;
+  ativo: IsilinkStatus | null; // null = criação automática de grupo
   member_count: number | null;
   http_status: number | null;
   result: string;

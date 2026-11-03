@@ -1,6 +1,6 @@
 // Smoke do REDIRECIONAMENTO isiLink: roda o modulo contra um `wa` falso e um
 // isiLink falso (HTTP local) e confere lotar / histerese / reabrir / convite
-// redefinido / grupo retirado / erros do contrato / gate free.
+// redefinido / grupo retirado / erros do contrato / gate free / campo "semana".
 import { mkdirSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -42,10 +42,12 @@ const server = createServer((req, res) => {
     const g = fila.find((x) => x.grupo === b.grupo);
     if (!g) {
       if (modo === 'plan_limit') return reply(200, { ok: false, action: 'ignored', reason: 'plan_limit' });
-      fila.push({ grupo: b.grupo, ativo });
+      fila.push({ grupo: b.grupo, ativo, semana: b.semana ?? 'ambas' });
       return reply(200, { ok: true, action: 'added' });
     }
-    if (g.ativo === ativo) return reply(200, { ok: true, action: 'unchanged' });
+    const semanaMudou = b.semana !== undefined && b.semana !== g.semana;
+    if (b.semana !== undefined) g.semana = b.semana;
+    if (g.ativo === ativo) return reply(200, { ok: true, action: semanaMudou ? 'updated' : 'unchanged' });
     g.ativo = ativo;
     return reply(200, { ok: true, action: ativo ? 'activated' : 'deactivated' });
   });
@@ -132,6 +134,29 @@ check('URL nova entrou no fim da fila', fila.at(-1).grupo.endsWith('/BBB2'));
 n0 = chamadas.length;
 await il.resync(id);
 check('conferencia sem mudanca nao envia', chamadas.length === n0);
+
+// 6b) Semana: nao classificado omite; classificar reenvia o mesmo "ativo" -> updated
+check('grupo sem semana: corpo sem o campo', chamadas.every((c) => !('semana' in c)));
+const classifica = async (jid, week) => {
+  db.prepare('UPDATE group_info SET week = ? WHERE jid = ?').run(week, jid);
+  il.onClassified(jid);
+  await settle();
+};
+for (const [week, wire] of [['impar', 'ímpar'], ['par', 'par'], ['ambas', 'ambas']]) {
+  n0 = chamadas.length;
+  await classifica('b@g.us', week);
+  const c = chamadas.slice(n0);
+  check(`semana ${wire}: um envio com o mesmo "ativo"`, c.length === 1 && c[0].semana === wire && c[0].ativo === 'sim', JSON.stringify(c));
+  check(`semana ${wire}: "updated" tratado como sucesso`, status('b@g.us').last_result === 'updated' && !status('b@g.us').last_error && status('b@g.us').status === 'sim');
+}
+n0 = chamadas.length;
+await il.resync(id);
+check('semana ja aceita: conferencia nao reenvia', chamadas.length === n0);
+await classifica('b@g.us', null);
+check('semana removida: nada enviado (omitir nao apaga)', chamadas.length === n0);
+check('fila do isiLink manteve "ambas"', fila.find((f) => f.grupo.endsWith('/BBB2')).semana === 'ambas');
+await classifica('b@g.us', 'par');
+check('reclassificar depois de limpar reenvia a semana', chamadas.at(-1).semana === 'par');
 
 // 7) Grupo novo com fila cheia (plan_limit) e depois liberada
 modo = 'plan_limit';

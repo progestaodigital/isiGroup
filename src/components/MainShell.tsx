@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { check, Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Approval,
   LicenseState,
@@ -229,6 +230,8 @@ function SupportView() {
   );
 }
 
+const COMMUNITY_URL = "https://chat.whatsapp.com/G7rvhgeEx8336sBIMtvgYt";
+
 function Overview({
   license,
   onGo,
@@ -246,6 +249,13 @@ function Overview({
       <p className="muted">Fundação operacional. Conecte um número para começar.</p>
 
       <UpdateBanner />
+
+      <div className="alert highlight">
+        <div>
+          <span className="alert-title">Entre em nosso grupo exclusivo</span>
+        </div>
+        <button type="button" className="cta" onClick={() => openUrl(COMMUNITY_URL)}>Entrar no grupo</button>
+      </div>
 
       <div className="card">
         <label className="check privacy-toggle">

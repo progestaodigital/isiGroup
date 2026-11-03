@@ -316,7 +316,9 @@ export function createWhatsApp(db, sessionRootDir) {
     );
     return db
       .prepare(
-        'SELECT id, account_id, jid, name, type, is_admin, last_synced_at FROM targets ORDER BY is_admin DESC, name COLLATE NOCASE'
+        `SELECT t.id, t.account_id, t.jid, t.name, t.type, t.is_admin, t.last_synced_at, i.category, i.week
+           FROM targets t LEFT JOIN group_info i ON i.jid = t.jid
+          ORDER BY t.is_admin DESC, t.name COLLATE NOCASE`
       )
       .all()
       .filter((r) => r.account_id != null && connected.has(r.account_id));
@@ -358,6 +360,7 @@ export function createWhatsApp(db, sessionRootDir) {
     accountSetSubject: (id, jid, s) => getSession(id).setSubject(jid, s),
     accountSetDescription: (id, jid, d) => getSession(id).setDescription(jid, d),
     accountSetGroupPicture: (id, jid, buf) => getSession(id).setGroupPicture(jid, buf),
+    accountGroupPicture: (id, jid) => getSession(id).groupPicture(jid),
     accountSetGroupSetting: (id, jid, setting) => getSession(id).setGroupSetting(jid, setting),
     accountSetMemberAddMode: (id, jid, mode) => getSession(id).setMemberAddMode(jid, mode),
     accountSetJoinApproval: (id, jid, mode) => getSession(id).setJoinApproval(jid, mode),
@@ -1106,6 +1109,14 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
     if (!isConnected()) throw new Error('WhatsApp nao conectado');
     return sock.updateProfilePicture(jid, buffer); // Baileys reamostra com sharp
   }
+  // Foto atual do grupo (Buffer) ou null se nao tiver / nao der para ler.
+  async function groupPicture(jid) {
+    if (!isConnected()) throw new Error('WhatsApp nao conectado');
+    const url = await sock.profilePictureUrl(jid, 'image').catch(() => null);
+    if (!url) return null;
+    const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+    return res.ok ? Buffer.from(await res.arrayBuffer()) : null;
+  }
   // setting: 'announcement'|'not_announcement'|'locked'|'unlocked'
   async function setGroupSetting(jid, setting) {
     if (!isConnected()) throw new Error('WhatsApp nao conectado');
@@ -1133,7 +1144,7 @@ function createSession({ db, accountId, sessionDir, getHandlers }) {
     createGroup, addParticipants, promoteParticipants, demoteParticipants, groupParticipants,
     resolveGroupMembers, groupMetadata, groupInviteCode,
     setSubject, setDescription, setGroupPicture, setGroupSetting, setMemberAddMode,
-    setJoinApproval, onWhatsApp,
+    setJoinApproval, onWhatsApp, groupPicture,
   };
 }
 

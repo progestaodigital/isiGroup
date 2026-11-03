@@ -392,7 +392,7 @@ function RuleForm({ targets, isPro, editing, editingLink, onCreated }: { targets
       </div>
 
       {trigger === "group_full" && (
-        <IsilinkFields draft={isilink} setDraft={setIsilink} targets={targets} editing={editingLink ?? null} />
+        <IsilinkFields draft={isilink} setDraft={setIsilink} targets={targets} accounts={accounts} editing={editingLink ?? null} />
       )}
 
       {trigger === "message" && (

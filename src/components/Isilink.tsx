@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  GroupWeek,
   IsilinkEvent,
   IsilinkGroup,
   IsilinkLink,
   NewIsilinkLink,
+  Account,
   Target,
   deleteIsilink,
   listIsilinkEvents,
@@ -19,13 +21,18 @@ import {
 export const MAX_GROUP_SIZE = 1024;
 const ISILINK_INFO_URL = "https://ly.isitools.com.br/isilink-isigroup";
 
+const WEEK_LABEL: Record<GroupWeek, string> = { par: "par", impar: "ímpar", ambas: "ambas" };
+
 const RESULT_LABEL: Record<string, string> = {
   activated: "ativado",
   deactivated: "desativado",
   added: "entrou na fila",
   unchanged: "sem mudança",
+  updated: "semana atualizada",
   ignored: "ignorado (limite do plano)",
   erro: "erro",
+  created: "grupo criado",
+  create_failed: "falha ao criar grupo",
 };
 
 // --- Formulário (campos controlados pelo RuleForm) ---
@@ -36,6 +43,7 @@ export interface IsilinkDraft {
   max: number;
   reopen: number;
   order: string[]; // jids, na ordem da fila
+  creator: number | null;
 }
 
 export function isilinkDraft(l?: IsilinkLink | null): IsilinkDraft {
@@ -45,6 +53,7 @@ export function isilinkDraft(l?: IsilinkLink | null): IsilinkDraft {
     max: l?.max_members ?? 1000,
     reopen: l?.reopen_at ?? 950,
     order: l?.groups.map((g) => g.jid) ?? [],
+    creator: l?.creator_account_id ?? null,
   };
 }
 
@@ -54,18 +63,20 @@ export function isilinkPayload(name: string, d: IsilinkDraft): { error: string }
   if (!Number.isInteger(d.max) || d.max < 2 || d.max > MAX_GROUP_SIZE) return { error: `O máximo de membros vai de 2 a ${MAX_GROUP_SIZE}.` };
   if (!Number.isInteger(d.reopen) || d.reopen < 0 || d.reopen >= d.max) return { error: '"Reabre com" precisa ser menor que o máximo de membros.' };
   if (d.order.length === 0) return { error: "Selecione ao menos um grupo." };
-  return { name, webhook_url: d.url.trim(), secret: d.secret, max_members: d.max, reopen_at: d.reopen, groups: d.order };
+  return { name, webhook_url: d.url.trim(), secret: d.secret, max_members: d.max, reopen_at: d.reopen, creator_account_id: d.creator, groups: d.order };
 }
 
 export function IsilinkFields({
   draft,
   setDraft,
   targets,
+  accounts,
   editing,
 }: {
   draft: IsilinkDraft;
   setDraft: (fn: (d: IsilinkDraft) => IsilinkDraft) => void;
   targets: Target[];
+  accounts: Account[];
   editing: IsilinkLink | null;
 }) {
   const patch = (p: Partial<IsilinkDraft>) => setDraft((d) => ({ ...d, ...p }));
@@ -127,6 +138,24 @@ export function IsilinkFields({
         </label>
       </div>
       <span className="hint">Conta todos os participantes, inclusive admins e o próprio chip. Entre os dois números o grupo mantém o status atual.</span>
+
+      <label className="field">
+        <span>Criar grupo novo automaticamente</span>
+        <select
+          value={draft.creator ?? ""}
+          onChange={(e) => patch({ creator: e.currentTarget.value ? Number(e.currentTarget.value) : null })}
+        >
+          <option value="">Não criar</option>
+          {accounts.map((a) => (
+            <option key={a.id} value={a.id}>Criar pelo chip {a.label}</option>
+          ))}
+        </select>
+        <span className="hint">
+          Quando todos os grupos de uma subcategoria (categoria + semana, na tela Grupos) passarem de 60% do máximo,
+          este chip cria o próximo da numeração dela (ímpar 9 → 11, par 10 → 12, ambas 5 → 6), copiando descrição, foto,
+          configurações, chips admin, agendamentos, automações e edições recorrentes. No máximo 5 por dia por link.
+        </span>
+      </label>
 
       <div className="field">
         <span>Grupos do redirecionamento ({draft.order.length} selecionado{draft.order.length === 1 ? "" : "s"})</span>
@@ -244,6 +273,8 @@ function GroupRow({ pos, g, max }: { pos: number; g: IsilinkGroup; max: number }
         <b>{pos}. <span data-sensivel="grupo">{g.name ?? g.jid.split("@")[0]}</span></b>
         <div className="muted small">
           {g.member_count == null ? "tamanho desconhecido" : `${g.member_count} / ${max} membros`}
+          {g.category && ` · ${g.category}`}
+          {` · semana: ${g.week ? WEEK_LABEL[g.week] : "não classificada"}`}
           {g.last_result && ` · isiLink: ${RESULT_LABEL[g.last_result] ?? g.last_result}`}
           {g.last_sent_at && ` · ${new Date(g.last_sent_at).toLocaleString("pt-BR")}`}
         </div>
@@ -267,8 +298,8 @@ function EventsList({ linkId, groups }: { linkId: number; groups: IsilinkGroup[]
       {events.map((e) => (
         <div key={e.id} className="row-item">
           <div>
-            <b>{e.ativo === "sim" ? "Abrir" : "Fechar"}</b>{" "}
-            <span className="muted small" data-sensivel="grupo">{names[e.jid] ?? e.jid.split("@")[0]}</span>
+            <b>{e.ativo === "sim" ? "Abrir" : e.ativo === "nao" ? "Fechar" : "Criar grupo"}</b>{" "}
+            <span className="muted small" data-sensivel="grupo">{names[e.jid] ?? e.jid?.split("@")[0]}</span>
             <div className="muted small">
               {e.member_count != null && `${e.member_count} membros · `}
               {e.http_status ? `HTTP ${e.http_status} · ` : ""}

@@ -2,7 +2,7 @@
 //
 // Cada link do isiLink tem uma fila ordenada de grupos; o clique vai para o
 // primeiro grupo ATIVO. O isiGroup mantem essa fila em dia pelo webhook do
-// isiLink (`POST {grupo, ativo}`):
+// isiLink (`POST {grupo, ativo, semana?}`):
 //
 //  * o grupo chegou a `max_members`        -> "ativo": "não" (lotou)
 //  * o grupo caiu para `reopen_at` ou menos -> "ativo": "sim" (reabre)
@@ -17,14 +17,27 @@
 // isiLink). Envios de um mesmo link sao serializados: a ordem importa, porque
 // grupo novo entra no FIM da fila do isiLink.
 //
+// "semana" (par | ímpar | ambas) vem da classificacao do grupo (group_info.week);
+// grupo nao classificado omite o campo (o isiLink mantem o que tinha). Mudou so
+// a semana: reenvia o mesmo "ativo" e o isiLink responde "updated".
+//
+// Criacao automatica (link com chip criador): quando TODOS os grupos de uma
+// subcategoria (categoria + semana) do link passam de 60% do maximo, o chip
+// cria o proximo grupo da numeracao dela (ver groupclone.mjs), que entra no
+// fim da fila. So a subcategoria cheia cresce: impares lotando nao criam par.
+//
 // Recurso Pro: gate no motor (aqui) e nas rotas (/isilink/* no index.mjs).
 
 import { saveMemberCount } from './whatsapp.mjs';
+import { cloneGroup, groupNumber, nextGroupName } from './groupclone.mjs';
 
 const MAX_ATTEMPTS = 3;
 const DEBOUNCE_MS = 3000; // agrupa a rajada de entradas (e os N chips do grupo)
 const RECONCILE_MS = 5 * 60_000; // conferencia periodica: contagem real + convite
 export const MAX_GROUP_SIZE = 1024; // teto do WhatsApp
+const GROW_AT = 0.6; // todos da subcategoria acima disto -> cria o proximo
+const MAX_CREATES_PER_DAY = 5; // por link: trava contra configuracao errada
+const CREATE_RETRY_MS = 10 * 60_000; // apos falha, espera antes de tentar de novo
 
 export function createIsilink(db, wa, editionState, opts = {}) {
   const debounceMs = opts.debounceMs ?? DEBOUNCE_MS;
@@ -66,7 +79,7 @@ export function createIsilink(db, wa, editionState, opts = {}) {
     return code ?? null;
   }
 
-  const info = (jid) => db.prepare('SELECT member_count, invite_code FROM group_info WHERE jid = ?').get(jid) ?? {};
+  const info = (jid) => db.prepare('SELECT member_count, invite_code, week, category FROM group_info WHERE jid = ?').get(jid) ?? {};
 
   // --- Decisao ----------------------------------------------------------------
 
@@ -79,16 +92,22 @@ export function createIsilink(db, wa, editionState, opts = {}) {
     return last ?? 'sim';
   }
 
-  // Avalia um grupo de um link e avisa o isiLink se o status mudou.
-  // opts.refresh = le contagem e convite no WhatsApp antes (senao usa o banco).
+  // Avalia um grupo de um link: avisa o isiLink se o status mudou e cria o
+  // proximo grupo se a subcategoria dele encheu.
   async function evaluate(linkId, jid, opts = {}) {
+    await evaluateStatus(linkId, jid, opts);
+    await maybeGrow(linkId, jid);
+  }
+
+  // opts.refresh = le contagem e convite no WhatsApp antes (senao usa o banco).
+  async function evaluateStatus(linkId, jid, opts = {}) {
     if (!isPro()) return;
     const link = db.prepare('SELECT * FROM isilink_links WHERE id = ?').get(linkId);
     if (!link || !link.enabled) return;
     const row = db.prepare('SELECT * FROM isilink_groups WHERE link_id = ? AND jid = ?').get(linkId, jid);
     if (!row) return;
 
-    let { member_count: count, invite_code: code } = info(jid);
+    let { member_count: count, invite_code: code, week } = info(jid);
     if (opts.refresh || count == null) {
       try { count = (await refreshCount(jid)) ?? count; } catch (e) { console.error(`[isilink] contagem de ${jid}:`, e?.message); }
     }
@@ -108,28 +127,95 @@ export function createIsilink(db, wa, editionState, opts = {}) {
         const r = await send(link, jid, row.invite_url, 'nao', count);
         if (!r.ok) return setResult(row.id, r.result, `convite mudou; falha ao desativar a URL antiga: ${r.error}`);
       }
-      db.prepare('UPDATE isilink_groups SET invite_url = ?, last_status = NULL WHERE id = ?').run(url, row.id);
+      db.prepare('UPDATE isilink_groups SET invite_url = ?, last_status = NULL, last_week = NULL WHERE id = ?').run(url, row.id);
       last = null;
+      row.last_week = null;
       console.error(`[isilink] "${link.name}": convite de ${jid} mudou — URL nova entra no fim da fila`);
     }
 
     const want = desiredStatus(link, count, last);
     if (!want) return setResult(row.id, 'erro', 'tamanho do grupo desconhecido: nenhum chip conectado neste grupo');
-    if (want === last && row.invite_url === url && row.last_result !== 'ignored') return; // nada mudou
+    // Sem semana (nao classificado) nao ha o que reenviar: omitir nao apaga no isiLink.
+    const weekSent = !week || week === row.last_week;
+    if (want === last && weekSent && row.invite_url === url && row.last_result !== 'ignored') return; // nada mudou
 
     const r = await send(link, jid, url, want, count);
+    const accepted = r.ok && r.result !== 'ignored';
     db.prepare(
-      `UPDATE isilink_groups SET invite_url = ?, last_status = ?, last_result = ?, last_error = ?, last_sent_at = ? WHERE id = ?`
+      `UPDATE isilink_groups SET invite_url = ?, last_status = ?, last_week = ?, last_result = ?, last_error = ?, last_sent_at = ? WHERE id = ?`
     ).run(
       url,
       // `ignored` (limite do plano): o grupo NAO entrou na fila — continua
       // "nunca enviado", para a proxima conferencia tentar de novo.
-      r.ok && r.result !== 'ignored' ? want : last,
+      accepted ? want : last,
+      accepted ? week ?? row.last_week : row.last_week,
       r.result,
       r.error ?? (r.result === 'ignored' ? 'fila do isiLink cheia (limite do plano)' : null),
       new Date().toISOString(),
       row.id
     );
+  }
+
+  // --- Criacao automatica ----------------------------------------------------
+  const lastFail = new Map(); // `${link}|${categoria}|${semana}` -> ms da ultima falha
+
+  async function maybeGrow(linkId, jid) {
+    if (!isPro()) return;
+    const link = db.prepare('SELECT * FROM isilink_links WHERE id = ?').get(linkId);
+    if (!link?.enabled || !link.creator_account_id) return;
+    const { week, category } = info(jid);
+    if (!week) return; // sem subcategoria, nao ha numeracao para seguir
+
+    const subs = db
+      .prepare(
+        `SELECT g.jid, i.member_count FROM isilink_groups g JOIN group_info i ON i.jid = g.jid
+          WHERE g.link_id = ? AND i.week = ? AND i.category IS ?`
+      )
+      .all(linkId, week, category ?? null);
+    const limit = Math.ceil(link.max_members * GROW_AT);
+    // Contagem desconhecida nao decide; um grupo abaixo de 60% ainda tem vaga.
+    if (subs.some((g) => g.member_count == null || g.member_count < limit)) return;
+
+    const key = `${linkId}|${category ?? ''}|${week}`;
+    if (Date.now() - (lastFail.get(key) ?? 0) < CREATE_RETRY_MS) return;
+    const since = new Date();
+    since.setHours(0, 0, 0, 0);
+    const today = db
+      .prepare("SELECT COUNT(*) AS n FROM isilink_events WHERE link_id = ? AND result = 'created' AND created_at >= ?")
+      .get(linkId, since.toISOString()).n;
+    if (today >= MAX_CREATES_PER_DAY) return;
+
+    const fail = (error, at = jid) => {
+      lastFail.set(key, Date.now());
+      logEvent(link.id, at, null, null, null, 'create_failed', error);
+      console.error(`[isilink] "${link.name}": nao criou grupo (${category ?? 'sem categoria'}/${week}): ${error}`);
+    };
+    const named = subs.map((g) => ({ jid: g.jid, name: groupName(g.jid) })).filter((g) => g.name);
+    const template = named.sort((a, b) => groupNumber(b.name) - groupNumber(a.name))[0];
+    const name = template && nextGroupName(template.name, week);
+    if (!name) return fail('o nome dos grupos da subcategoria nao tem numero para seguir a sequencia');
+    if (!wa.isAccountConnected(link.creator_account_id)) return fail('chip criador nao conectado');
+
+    let r;
+    try {
+      r = await cloneGroup(db, wa, {
+        templateJid: template.jid, subJids: subs.map((g) => g.jid), name,
+        accountId: link.creator_account_id, category, week,
+      });
+    } catch (e) {
+      return fail(`falha ao criar "${name}": ${e?.message ?? 'erro'}`, template.jid);
+    }
+    lastFail.delete(key);
+    const order = db.prepare('SELECT COALESCE(MAX(order_index), -1) + 1 AS n FROM isilink_groups WHERE link_id = ?').get(linkId).n;
+    db.prepare('INSERT INTO isilink_groups (link_id, jid, order_index) VALUES (?,?,?)').run(linkId, r.jid, order);
+    const detail = `"${name}": ${r.done.join(', ')}${r.fail.length ? ` · ✗ ${r.fail.join('; ')}` : ''}`;
+    logEvent(link.id, r.jid, null, null, r.count, 'created', detail);
+    console.error(`[isilink] "${link.name}": criou ${detail}`);
+    await evaluateStatus(linkId, r.jid, { refresh: true }); // entra no fim da fila do isiLink
+  }
+
+  function groupName(jid) {
+    return db.prepare("SELECT name FROM targets WHERE jid = ? AND name <> '' ORDER BY account_id LIMIT 1").get(jid)?.name ?? null;
   }
 
   function setResult(rowId, result, error) {
@@ -152,18 +238,22 @@ export function createIsilink(db, wa, editionState, opts = {}) {
   // --- Envio --------------------------------------------------------------------
 
   async function send(link, jid, url, ativo, count) {
-    const r = await postIsilink(link.webhook_url, link.secret, url, ativo);
+    const r = await postIsilink(link.webhook_url, link.secret, url, ativo, info(jid).week);
+    logEvent(link.id, jid, url, ativo, count, r.result, r.error, r.http);
+    console.error(`[isilink] "${link.name}" ${ativo} ${url} (${count ?? '?'} membros): ${r.result}${r.error ? ` — ${r.error}` : ''}`);
+    return r;
+  }
+
+  function logEvent(linkId, jid, url, ativo, count, result, error, http = null) {
     db.prepare(
       `INSERT INTO isilink_events (link_id, jid, invite_url, ativo, member_count, http_status, result, error, created_at)
        VALUES (?,?,?,?,?,?,?,?,?)`
-    ).run(link.id, jid, url, ativo, count ?? null, r.http ?? null, r.result, r.error ?? null, new Date().toISOString());
+    ).run(linkId, jid, url, ativo, count ?? null, http, result, error ?? null, new Date().toISOString());
     // Poda: guarda as ultimas 500 chamadas por link.
     db.prepare(
       `DELETE FROM isilink_events WHERE link_id = ? AND id NOT IN
          (SELECT id FROM isilink_events WHERE link_id = ? ORDER BY id DESC LIMIT 500)`
-    ).run(link.id, link.id);
-    console.error(`[isilink] "${link.name}" ${ativo} ${url} (${count ?? '?'} membros): ${r.result}${r.error ? ` — ${r.error}` : ''}`);
-    return r;
+    ).run(linkId, linkId);
   }
 
   // --- Eventos de entrada/saida --------------------------------------------------
@@ -209,6 +299,15 @@ export function createIsilink(db, wa, editionState, opts = {}) {
     for (const l of links) enqueue(l.link_id, () => evaluate(l.link_id, jid));
   }
 
+  // Classificacao do grupo mudou (tela Grupos): reenvia a semana nos links dele.
+  function onClassified(jid) {
+    if (!isPro()) return;
+    const links = db
+      .prepare('SELECT g.link_id FROM isilink_groups g JOIN isilink_links l ON l.id = g.link_id WHERE g.jid = ? AND l.enabled = 1')
+      .all(jid);
+    for (const l of links) enqueue(l.link_id, () => evaluate(l.link_id, jid));
+  }
+
   // --- CRUD (rotas /isilink/*) ---------------------------------------------------
 
   function list() {
@@ -220,7 +319,7 @@ export function createIsilink(db, wa, editionState, opts = {}) {
       enabled: !!l.enabled,
       groups: db
         .prepare(
-          `SELECT g.*, i.member_count, i.count_at FROM isilink_groups g
+          `SELECT g.*, i.member_count, i.count_at, i.category, i.week FROM isilink_groups g
              LEFT JOIN group_info i ON i.jid = g.jid
             WHERE g.link_id = ? ORDER BY g.order_index`
         )
@@ -231,6 +330,8 @@ export function createIsilink(db, wa, editionState, opts = {}) {
           order_index: g.order_index,
           member_count: g.member_count ?? null,
           count_at: g.count_at ?? null,
+          category: g.category ?? null,
+          week: g.week ?? null,
           invite_url: g.invite_url,
           status: g.last_status,
           last_result: g.last_result,
@@ -263,13 +364,17 @@ export function createIsilink(db, wa, editionState, opts = {}) {
       return { error: '"reabre com" deve ser um inteiro menor que o maximo de membros' };
     }
     if (groups.length === 0) return { error: 'selecione ao menos um grupo' };
+    const creator = body?.creator_account_id == null || body.creator_account_id === '' ? null : Number(body.creator_account_id);
+    if (creator !== null && !db.prepare('SELECT 1 FROM accounts WHERE id = ?').get(creator)) {
+      return { error: 'chip criador nao encontrado' };
+    }
     const semAdmin = groups.filter(
       (jid) => !db.prepare('SELECT 1 FROM targets WHERE jid = ? AND is_admin = 1 LIMIT 1').get(jid)
     );
     if (semAdmin.length) {
       return { error: `${semAdmin.length} grupo(s) sem chip admin: o link de convite so pode ser lido por um admin` };
     }
-    return { name, url, secret, max, reopen, groups };
+    return { name, url, secret, max, reopen, groups, creator };
   }
 
   function create(body) {
@@ -280,10 +385,10 @@ export function createIsilink(db, wa, editionState, opts = {}) {
     try {
       id = db
         .prepare(
-          `INSERT INTO isilink_links (name, webhook_url, secret, max_members, reopen_at, enabled, created_at)
-           VALUES (?,?,?,?,?,1,?)`
+          `INSERT INTO isilink_links (name, webhook_url, secret, max_members, reopen_at, creator_account_id, enabled, created_at)
+           VALUES (?,?,?,?,?,?,1,?)`
         )
-        .run(v.name, v.url, v.secret || null, v.max, v.reopen, new Date().toISOString()).lastInsertRowid;
+        .run(v.name, v.url, v.secret || null, v.max, v.reopen, v.creator, new Date().toISOString()).lastInsertRowid;
       const ins = db.prepare('INSERT INTO isilink_groups (link_id, jid, order_index) VALUES (?,?,?)');
       v.groups.forEach((jid, i) => ins.run(id, jid, i));
       db.exec('COMMIT;');
@@ -307,8 +412,8 @@ export function createIsilink(db, wa, editionState, opts = {}) {
     const removed = current.filter((g) => !keep.has(g.jid));
     db.exec('BEGIN;');
     try {
-      db.prepare('UPDATE isilink_links SET name=?, webhook_url=?, secret=?, max_members=?, reopen_at=? WHERE id=?')
-        .run(v.name, v.url, v.secret || null, v.max, v.reopen, id);
+      db.prepare('UPDATE isilink_links SET name=?, webhook_url=?, secret=?, max_members=?, reopen_at=?, creator_account_id=? WHERE id=?')
+        .run(v.name, v.url, v.secret || null, v.max, v.reopen, v.creator, id);
       for (const g of removed) db.prepare('DELETE FROM isilink_groups WHERE id = ?').run(g.id);
       const upd = db.prepare('UPDATE isilink_groups SET order_index = ? WHERE link_id = ? AND jid = ?');
       const ins = db.prepare('INSERT INTO isilink_groups (link_id, jid, order_index) VALUES (?,?,?)');
@@ -367,21 +472,28 @@ export function createIsilink(db, wa, editionState, opts = {}) {
     pending.clear();
   }
 
-  return { start, stop, onMembership, list, events, create, update, toggle, remove, resync, reconcileAll, _idle: () => Promise.all([...chains.values()]) };
+  return { start, stop, onMembership, onClassified, list, events, create, update, toggle, remove, resync, reconcileAll, _idle: () => Promise.all([...chains.values()]) };
 }
+
+export const GROUP_WEEKS = ['par', 'impar', 'ambas'];
+const WEEK_WIRE = { par: 'par', impar: 'ímpar', ambas: 'ambas' };
 
 export function inviteUrl(code) {
   return `https://chat.whatsapp.com/${code}`;
 }
 
 // Chamada ao webhook isiGroup do isiLink. Contrato:
-//   200 { ok:true, action: activated|deactivated|added|unchanged }
+//   200 { ok:true, action: activated|deactivated|added|unchanged|updated }
+//       (updated = so a semana mudou; qualquer action com ok:true e sucesso)
 //   200 { ok:false, action:'ignored', reason:'plan_limit' }
 //   400 / 401 / 404 -> erro de configuracao: NAO re-tenta.
 //   5xx / rede      -> re-tenta com backoff.
 // Retorna { ok, http, result, error }.
-export async function postIsilink(webhookUrl, secret, grupo, ativo) {
-  const body = JSON.stringify({ grupo, ativo: ativo === 'sim' ? 'sim' : 'não' });
+// semana: 'par' | 'impar' | 'ambas' | null (null = omite o campo).
+export async function postIsilink(webhookUrl, secret, grupo, ativo, semana = null) {
+  const payload = { grupo, ativo: ativo === 'sim' ? 'sim' : 'não' };
+  if (WEEK_WIRE[semana]) payload.semana = WEEK_WIRE[semana];
+  const body = JSON.stringify(payload);
   const headers = { 'content-type': 'application/json' };
   if (secret) headers['x-webhook-secret'] = secret;
 

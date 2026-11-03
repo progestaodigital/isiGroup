@@ -12,7 +12,7 @@ import { createWhatsApp } from './src/whatsapp.mjs';
 import { createScheduler } from './src/scheduler.mjs';
 import { saveUpload } from './src/media.mjs';
 import { createAutomation } from './src/automation.mjs';
-import { createIsilink } from './src/isilink.mjs';
+import { GROUP_WEEKS, createIsilink } from './src/isilink.mjs';
 import { createBulk } from './src/bulk.mjs';
 import { createPlans, schemaDoc } from './src/plans.mjs';
 import { createIntegration } from './src/integration.mjs';
@@ -352,6 +352,26 @@ async function route(req, res, url) {
   }
   if (match('GET', '/targets')) {
     return json(res, 200, { targets: wa.listTargets() });
+  }
+
+  // Classificacao do grupo (categoria livre + semana par/impar/ambas), por jid.
+  if (match('PUT', '/targets/category')) {
+    const b = await readJson(req);
+    const jid = String(b?.jid ?? '');
+    const category = String(b?.category ?? '').trim().slice(0, 60) || null;
+    const week = b?.week == null || b.week === '' ? null : String(b.week);
+    if (!db.prepare('SELECT 1 FROM targets WHERE jid = ? LIMIT 1').get(jid)) {
+      return json(res, 404, { error: 'not_found', message: 'grupo nao encontrado' });
+    }
+    if (week !== null && !GROUP_WEEKS.includes(week)) {
+      return json(res, 400, { error: 'bad_request', message: 'semana deve ser par, impar ou ambas' });
+    }
+    db.prepare(
+      `INSERT INTO group_info (jid, category, week) VALUES (?,?,?)
+       ON CONFLICT(jid) DO UPDATE SET category = excluded.category, week = excluded.week`
+    ).run(jid, category, week);
+    isilink.onClassified(jid);
+    return json(res, 200, { ok: true });
   }
 
   // --- Selecoes de grupos salvas (picker do agendador) ---
