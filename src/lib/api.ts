@@ -553,6 +553,18 @@ export async function uploadMedia(file: File): Promise<MediaInfo> {
   return media as MediaInfo;
 }
 
+// Preview: <img>/<audio>/<video> não mandam o header do token, então baixa via
+// fetch e devolve uma URL blob: (quem chama faz revokeObjectURL).
+export async function mediaBlobUrl(m: MediaInfo): Promise<string> {
+  if (!cachedInfo) cachedInfo = await getSidecarInfo();
+  const nome = m.stored_path.split(/[\\/]/).pop() ?? "";
+  const res = await fetch(`http://127.0.0.1:${cachedInfo.port}/media/file/${encodeURIComponent(nome)}`, {
+    headers: { "x-isi-token": cachedInfo.token },
+  });
+  if (!res.ok) throw new Error(`mídia HTTP ${res.status}`);
+  return URL.createObjectURL(new Blob([await res.arrayBuffer()], { type: m.mimetype || "" }));
+}
+
 // --- Keymaker: contagem de combinações + amostras -------------------------
 // `scope` muda só as variáveis disponíveis: em automação existe uma pessoa
 // ({{nome}}), num broadcast de grupo não.

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiStep, MediaInfo, SpinPreview, StepType, spinPreview, uploadMedia } from "../lib/api";
+import { ApiStep, MediaInfo, SpinPreview, StepType, mediaBlobUrl, spinPreview, uploadMedia } from "../lib/api";
 
 export const STEP_TYPES: StepType[] = ["text", "image", "audio", "video", "poll"];
 export const STEP_TYPE_LABEL: Record<StepType, string> = {
@@ -95,6 +95,33 @@ export function draftFromStored(step: {
     d.multi = (body.poll?.selectableCount ?? 1) > 1;
   }
   return d;
+}
+
+// Preview de uma mídia já enviada (imagem, ou player de áudio/vídeo).
+function MediaPreview({ media, type }: { media: MediaInfo; type: "image" | "audio" | "video" }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [erro, setErro] = useState(false);
+  useEffect(() => {
+    let vivo = true;
+    let criada: string | null = null;
+    mediaBlobUrl(media)
+      .then((u) => {
+        criada = u;
+        if (vivo) setUrl(u);
+        else URL.revokeObjectURL(u);
+      })
+      .catch(() => vivo && setErro(true));
+    return () => {
+      vivo = false;
+      if (criada) URL.revokeObjectURL(criada);
+    };
+  }, [media.stored_path]);
+
+  if (erro) return <span className="hint media-preview">Arquivo não encontrado no disco.</span>;
+  if (!url) return <span className="hint media-preview">Carregando preview…</span>;
+  if (type === "image") return <img className="media-preview" src={url} alt="" />;
+  if (type === "audio") return <audio className="media-preview" src={url} controls preload="metadata" />;
+  return <video className="media-preview" src={url} controls preload="metadata" />;
 }
 
 // ---------------------------------------------------------------------------
@@ -361,6 +388,7 @@ export function StepEditor({
                     {m.duration_seconds ? ` · ${m.duration_seconds}s` : ""}
                   </span>
                   <button type="button" className="link subtle danger" onClick={() => removeMedia(i)}>✕</button>
+                  <MediaPreview media={m} type={step.type as "image" | "audio" | "video"} />
                 </div>
               ))}
             </div>

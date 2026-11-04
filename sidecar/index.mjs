@@ -6,7 +6,7 @@
 import { createServer } from 'node:http';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { rmSync, existsSync, readFileSync, copyFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { rmSync, existsSync, readFileSync, copyFileSync, writeFileSync, mkdirSync, createReadStream } from 'node:fs';
 import { openDatabase } from './src/db.mjs';
 import { createWhatsApp } from './src/whatsapp.mjs';
 import { createScheduler } from './src/scheduler.mjs';
@@ -422,6 +422,16 @@ async function route(req, res, url) {
     const filename = decodeURIComponent(req.headers['x-filename'] || 'arquivo');
     const media = await saveUpload(mediaDir, buf, mimetype, filename);
     return json(res, 200, { media });
+  }
+
+  // --- Leitura de midia (preview na UI) ---
+  // So nomes simples: nada de "/" ou "..", entao nunca sai de mediaDir.
+  const mediaFile = path.match(/^\/media\/file\/([\w.-]+)$/);
+  if (method === 'GET' && mediaFile && !mediaFile[1].includes('..')) {
+    const p = join(mediaDir, mediaFile[1]);
+    if (!existsSync(p)) return json(res, 404, { error: 'not_found' });
+    res.writeHead(200, { 'content-type': 'application/octet-stream', 'cache-control': 'no-store', ...CORS });
+    return createReadStream(p).pipe(res);
   }
 
   // --- Agendamentos ---
