@@ -1485,6 +1485,8 @@ function deleteRule(res, id) {
   db.exec('BEGIN;');
   try {
     db.prepare('DELETE FROM automation_actions WHERE rule_id = ?').run(id);
+    // logs têm FK para a regra: desvincula em vez de apagar, o histórico fica
+    db.prepare('UPDATE automation_logs SET rule_id = NULL WHERE rule_id = ?').run(id);
     db.prepare('DELETE FROM automation_rules WHERE id = ?').run(id);
     db.exec('COMMIT;');
   } catch (e) {

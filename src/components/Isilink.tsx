@@ -139,23 +139,32 @@ export function IsilinkFields({
       </div>
       <span className="hint">Conta todos os participantes, inclusive admins e o próprio chip. Entre os dois números o grupo mantém o status atual.</span>
 
-      <label className="field">
-        <span>Criar grupo novo automaticamente</span>
-        <select
-          value={draft.creator ?? ""}
-          onChange={(e) => patch({ creator: e.currentTarget.value ? Number(e.currentTarget.value) : null })}
-        >
-          <option value="">Não criar</option>
-          {accounts.map((a) => (
-            <option key={a.id} value={a.id}>Criar pelo chip {a.label}</option>
-          ))}
-        </select>
+      <div className="field">
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={draft.creator != null}
+            disabled={accounts.length === 0}
+            onChange={(e) => patch({ creator: e.currentTarget.checked ? accounts[0]?.id ?? null : null })}
+          />
+          Criar grupos novos automaticamente
+        </label>
+        {draft.creator != null && (
+          <label className="field">
+            <span>Chip que cria os grupos</span>
+            <select value={draft.creator} onChange={(e) => patch({ creator: Number(e.currentTarget.value) })}>
+              {accounts.map((a) => (
+                <option key={a.id} value={a.id}>{a.label}</option>
+              ))}
+            </select>
+          </label>
+        )}
         <span className="hint">
           Quando todos os grupos de uma subcategoria (categoria + semana, na tela Grupos) passarem de 60% do máximo,
           este chip cria o próximo da numeração dela (ímpar 9 → 11, par 10 → 12, ambas 5 → 6), copiando descrição, foto,
           configurações, chips admin, agendamentos, automações e edições recorrentes. No máximo 5 por dia por link.
         </span>
-      </label>
+      </div>
 
       <div className="field">
         <span>Grupos do redirecionamento ({draft.order.length} selecionado{draft.order.length === 1 ? "" : "s"})</span>
