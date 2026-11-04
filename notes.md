@@ -1,7 +1,4 @@
-## Correções
+## Novidades
 
-### Apagar automações
-Automações que já tinham disparado alguma vez não eram apagadas: o botão **Apagar** não fazia nada. Agora apagam normalmente. O histórico de disparos continua em Logs.
-
-### Criação automática de grupos
-No redirecionamento isiLink, a opção virou uma caixa **Criar grupos novos automaticamente**. Quando marcada, aparece a escolha do chip que cria os grupos.
+### Preview das mídias
+Ao criar ou editar um agendamento ou uma automação, cada mídia enviada agora aparece na tela: imagens são exibidas e áudios e vídeos têm um player para ouvir ou assistir antes do envio. Se o arquivo não existir mais no computador, o app avisa.
