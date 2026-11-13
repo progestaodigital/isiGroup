@@ -303,7 +303,10 @@ export function StepEditor({
     const files = [...(e.currentTarget.files ?? [])];
     e.currentTarget.value = ""; // permite re-escolher o mesmo arquivo
     if (!files.length) return;
-    const livre = MAX_MEDIAS - step.medias.length;
+    // Free: 1 mídia por mensagem (rodízio é Pro) — escolher outra substitui a atual.
+    const atuais = isPro ? step.medias : [];
+    const nomesAtuais = isPro ? step.mediaNames : [];
+    const livre = (isPro ? MAX_MEDIAS : 1) - atuais.length;
     if (livre <= 0) {
       alert(`Máximo de ${MAX_MEDIAS} mídias por mensagem.`);
       return;
@@ -325,8 +328,8 @@ export function StepEditor({
       }
     }
     onPatch({
-      medias: [...step.medias, ...infos],
-      mediaNames: [...step.mediaNames, ...nomes],
+      medias: infos.length ? [...atuais, ...infos] : step.medias,
+      mediaNames: infos.length ? [...nomesAtuais, ...nomes] : step.mediaNames,
       uploading: false,
     });
     if (falhas.length) alert(`Falha no upload de ${accept}: ${falhas.join(", ")}`);
@@ -372,7 +375,7 @@ export function StepEditor({
         <>
           <input
             type="file"
-            multiple
+            multiple={isPro}
             accept={step.type === "image" ? "image/*" : step.type === "audio" ? "audio/*" : "video/*"}
             onChange={(e) => onFiles(e, step.type as "image" | "audio" | "video")}
           />

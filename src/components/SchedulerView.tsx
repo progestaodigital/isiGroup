@@ -388,10 +388,15 @@ function ScheduleForm({
     setErr(null);
     if (kind === "once" && !when) return setErr("Defina data e hora.");
     if (kind === "recurring" && !time) return setErr("Defina o horário.");
-    if (uiKind !== "variable" && options.length > 1) {
+    // Free (ex.: agendamento criado no Pro e a licença caiu): salva só a 1ª opção e
+    // a 1ª mídia de cada mensagem — várias opções/mídias são Pro e o sidecar daria 403.
+    const opts = isPro
+      ? options
+      : [options[0].map((st) => ({ ...st, medias: st.medias.slice(0, 1), mediaNames: st.mediaNames.slice(0, 1) }))];
+    if (isPro && uiKind !== "variable" && options.length > 1) {
       return setErr('Várias opções de mensagem só valem no "Recorrente variável".');
     }
-    if (uiKind === "variable" && options.length < 2) {
+    if (isPro && uiKind === "variable" && options.length < 2) {
       return setErr("O recorrente variável precisa de pelo menos 2 opções de mensagem.");
     }
     // "Mensagem por grupo" não tem opções (o texto é por destino): salvar assim
@@ -430,12 +435,12 @@ function ScheduleForm({
       } else {
         // Converte cada opcao; a primeira define o tipo exibido na lista.
         const apiOptions: ApiStep[][] = [];
-        for (const [oi, opt] of options.entries()) {
+        for (const [oi, opt] of opts.entries()) {
           const apiSteps: ApiStep[] = [];
           for (const s of opt) {
             const r = stepDraftToApi(s);
             if ("error" in r) {
-              return setErr(options.length > 1 ? `Opção ${oi + 1}: ${r.error}` : r.error);
+              return setErr(opts.length > 1 ? `Opção ${oi + 1}: ${r.error}` : r.error);
             }
             apiSteps.push(r);
           }
@@ -711,6 +716,12 @@ function ScheduleForm({
         </div>
       )}
 
+      {!isPro && mode !== "per_target" && (options.length > 1 || options.some((o) => o.some((st) => st.medias.length > 1))) && (
+        <p className="hint">
+          Este agendamento usa recursos do plano Pro (várias opções de mensagem ou várias mídias). No seu plano,
+          ao salvar fica só a 1ª opção e a 1ª mídia de cada mensagem.
+        </p>
+      )}
       {err && <p className="error">{err}</p>}
       <div className="gate-actions" style={{ justifyContent: "flex-start" }}>
         <button type="submit" disabled={busy || uploadingAny}>

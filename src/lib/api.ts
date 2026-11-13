@@ -585,7 +585,7 @@ export const spinPreview = (text: string, scope: "broadcast" | "automation" = "b
   });
 
 export const createSchedule = (s: NewSchedule) =>
-  sidecar<{ id: number }>("/schedules", {
+  sidecarWithMessage<{ id: number }>("/schedules", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(s),
@@ -626,7 +626,7 @@ export const getScheduleDetail = (id: number) =>
   sidecar<ScheduleDetail>(`/schedules/${id}`);
 
 export const updateSchedule = (id: number, s: NewSchedule) =>
-  sidecar<{ ok?: boolean; error?: string }>(`/schedules/${id}`, {
+  sidecarWithMessage<{ ok?: boolean; error?: string }>(`/schedules/${id}`, {
     method: "PUT",
     ...jbody(s),
   });
