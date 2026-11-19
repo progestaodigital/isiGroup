@@ -240,6 +240,14 @@ try {
   const del = await api(`/schedules/${created.body?.id}`, { method: 'DELETE' });
   check('apaga agendamento (FK dos passos ok)', del.status === 200, JSON.stringify(del.body));
 
+  // --- aba Log: o recorrente ativo aparece so como proxima execucao ---
+  const log = await api('/activity');
+  const next = (log.body?.rows ?? []).filter((r) => r.key === `sn:${rec.body?.id}`);
+  check('log lista a proxima execucao do recorrente', next.length === 1 && next[0].status === 'scheduled' && !!next[0].at, JSON.stringify(next));
+  const logDet = await api(`/activity/detail?key=sn:${rec.body?.id}`);
+  check('log detalha os grupos da proxima execucao', (logDet.body?.items ?? []).length > 0, JSON.stringify(logDet.body));
+  check('log recusa chave desconhecida', (await api('/activity/detail?key=zz:1')).status === 404);
+
   // --- automacao com spintax + 2 midias ---
   const rule = await api('/automation/rules', {
     method: 'POST',

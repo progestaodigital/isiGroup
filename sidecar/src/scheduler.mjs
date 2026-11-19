@@ -289,6 +289,7 @@ export function createScheduler(db, wa, editionState) {
           const variant = pickVariant(s);
           db.exec('BEGIN;');
           try {
+            archiveRun(db, s); // guarda o disparo anterior antes de repor os alvos (aba Log)
             db.prepare(
               `UPDATE schedules SET last_run_at = ?, recur_fired_at = ?, variant_current = ?, variant_used = ?
                  WHERE id = ?`
@@ -570,6 +571,21 @@ export function createScheduler(db, wa, editionState) {
   return { start, stop, tick };
 }
 
+// Copia o resultado do ultimo disparo de um recorrente para o historico
+// (schedule_run_items) — chamar ANTES de qualquer reset de schedule_targets e
+// zerar recur_fired_at junto, senao o mesmo disparo seria arquivado 2x.
+// `s` = linha de schedules ANTES do reset.
+export function archiveRun(db, s) {
+  if (s?.kind !== 'recurring' || !s.recur_fired_at) return;
+  db.prepare(
+    `INSERT INTO schedule_run_items
+       (schedule_id, run_date, option_index, group_name, group_jid, account_id, status, sent_at, error)
+     SELECT st.schedule_id, ?, ?, t.name, t.jid, st.account_id, st.status, st.sent_at, st.error
+       FROM schedule_targets st JOIN targets t ON t.id = st.target_id
+      WHERE st.schedule_id = ?`
+  ).run(s.recur_fired_at, Number.isInteger(s.variant_current) ? s.variant_current : null, s.id);
+}
+
 // Conteudo de um PASSO de sequencia (autossuficiente: tipo + corpo + midia).
 // `media` e a variacao SORTEADA: waveform, duracao e mimetype do audio vem
 // dela, nao das colunas do passo — cada arquivo tem os seus (Fase K5).
@@ -660,6 +676,6 @@ function parseArr(jsonStr) {
 const pad = (n) => String(n).padStart(2, '0');
 
 // Data local YYYY-MM-DD (para marcar o dia do disparo recorrente).
-function localDate(d) {
+export function localDate(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }

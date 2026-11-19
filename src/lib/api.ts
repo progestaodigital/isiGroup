@@ -130,7 +130,9 @@ async function sidecar<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { "x-isi-token": cachedInfo.token, ...(init?.headers ?? {}) },
   });
   if (!res.ok && res.status !== 409) {
-    throw new Error(`sidecar ${path} HTTP ${res.status}`);
+    // O motor manda o motivo em `message` (ex.: limite de adições) — sem ele o usuário só vê "HTTP 400".
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.message ?? data?.error ?? `sidecar ${path} HTTP ${res.status}`);
   }
   return res.json();
 }
@@ -718,6 +720,38 @@ export const createBulkJob = (b: NewBulkJob) =>
     ...jbody(b),
   });
 export const listBulkJobs = () => sidecar<{ jobs: BulkJobRow[] }>("/bulk");
+
+// --- Log (tudo que foi feito / em curso / agendado) ---
+export type ActivityStatus = "scheduled" | "running" | "done" | "partial" | "failed" | "canceled";
+export interface ActivityRow {
+  key: string;
+  kind: "message" | "bulk" | "automation" | "plan" | "isilink";
+  op?: BulkOp; // kind=bulk: o título vem do rótulo da operação
+  title: string | null;
+  sub: string;
+  status: ActivityStatus;
+  at: string | null;
+  ok: number;
+  failed: number;
+  skipped: number;
+  total: number;
+  done?: number;
+}
+export interface ActivityItem {
+  name: string;
+  phone?: string | null; // contato (privacidade: data-sensivel)
+  sub: string | null;
+  status: "ok" | "failed" | "skipped" | "pending";
+  detail: string | null;
+}
+export interface ActivityDetail {
+  info?: string;
+  phone?: string | null;
+  items: ActivityItem[];
+}
+export const listActivity = () => sidecar<{ rows: ActivityRow[] }>("/activity");
+export const getActivityDetail = (key: string) =>
+  sidecar<ActivityDetail>(`/activity/detail?key=${encodeURIComponent(key)}`);
 export const getBulkJob = (id: number) => sidecar<BulkJobDetail>(`/bulk/${id}`);
 // Edita um disparo AGENDADO que ainda não começou (o motor recusa os demais).
 export const updateBulkJob = (id: number, b: NewBulkJob) =>

@@ -34,7 +34,7 @@ import { RecurPreview } from "./RecurPreview";
 
 const MEMBER_OPS: BulkOp[] = ["add_members", "remove_members", "promote", "demote"];
 
-const OP_LABEL: Record<BulkOp, string> = {
+export const OP_LABEL: Record<BulkOp, string> = {
   add_members: "Adicionar membros",
   remove_members: "Excluir membros",
   promote: "Promover a admin",

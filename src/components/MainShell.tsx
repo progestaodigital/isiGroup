@@ -16,6 +16,7 @@ import { TargetsView } from "./TargetsView";
 import { SchedulerView } from "./SchedulerView";
 import { AutomationView } from "./AutomationView";
 import { BulkActionsView } from "./BulkActionsView";
+import { LogView } from "./LogView";
 import { AgentsView } from "./AgentsView";
 import { ExportView } from "./ExportView";
 import { aplicar, lerPreferencia, salvarPreferencia } from "../lib/privacy";
@@ -28,7 +29,7 @@ interface Props {
   onLicenseChange: (s: LicenseState) => void;
 }
 
-type View = "overview" | "connection" | "targets" | "scheduler" | "automation" | "bulk" | "agents" | "plans" | "export" | "faq" | "support";
+type View = "overview" | "connection" | "targets" | "scheduler" | "automation" | "bulk" | "log" | "agents" | "plans" | "export" | "faq" | "support";
 
 const FUTURE: { fase: number; nome: string }[] = [];
 
@@ -94,6 +95,12 @@ export function MainShell({ license, onLicenseChange }: Props) {
             Ações em massa
           </button>
           <button
+            className={`nav-item ${view === "log" ? "active" : ""}`}
+            onClick={() => setView("log")}
+          >
+            Log
+          </button>
+          <button
             className={`nav-item ${view === "agents" ? "active" : ""}`}
             onClick={() => setView("agents")}
           >
@@ -151,6 +158,7 @@ export function MainShell({ license, onLicenseChange }: Props) {
         {view === "scheduler" && <SchedulerView isPro={isPro} />}
         {view === "automation" && <AutomationView isPro={isPro} />}
         {view === "bulk" && <BulkActionsView />}
+        {view === "log" && <LogView />}
         {view === "agents" && <AgentsView isPro={isPro} />}
         {view === "plans" && <PlansView isPro={isPro} />}
         {view === "export" && <ExportView isPro={isPro} />}

@@ -9,11 +9,12 @@ import { fileURLToPath } from 'node:url';
 import { rmSync, existsSync, readFileSync, copyFileSync, writeFileSync, mkdirSync, createReadStream } from 'node:fs';
 import { openDatabase } from './src/db.mjs';
 import { createWhatsApp } from './src/whatsapp.mjs';
-import { createScheduler } from './src/scheduler.mjs';
+import { createScheduler, archiveRun } from './src/scheduler.mjs';
 import { saveUpload } from './src/media.mjs';
 import { createAutomation } from './src/automation.mjs';
 import { GROUP_WEEKS, createIsilink } from './src/isilink.mjs';
 import { createBulk } from './src/bulk.mjs';
+import { createActivity } from './src/activity.mjs';
 import { createPlans, schemaDoc } from './src/plans.mjs';
 import { createIntegration } from './src/integration.mjs';
 import { weekAllows, parityToCols, colsToParity } from './src/weeks.mjs';
@@ -94,6 +95,7 @@ wa.setMembershipHandler(async (eventType, info) => {
 
 // Acoes em massa (bulk): fila propria no SQLite, retomada no arranque.
 const bulk = createBulk(db, wa);
+const activity = createActivity(db);
 const ai = createAi(db);
 const exporter = createExporter(db);
 setUploadsDir(aiUploadsDir);
@@ -461,6 +463,13 @@ async function route(req, res, url) {
   const del = path.match(/^\/schedules\/(\d+)$/);
   if (method === 'DELETE' && del) {
     return deleteSchedule(res, Number(del[1]));
+  }
+
+  // --- Log (aba unica do que foi feito / em curso / agendado) ---
+  if (match('GET', '/activity')) return json(res, 200, { rows: activity.list() });
+  if (match('GET', '/activity/detail')) {
+    const d = activity.detail(url.searchParams.get('key'));
+    return d ? json(res, 200, d) : json(res, 404, { error: 'not_found' });
   }
 
   // --- Automacao por gatilho ---
@@ -1257,7 +1266,7 @@ function createSchedule(res, body) {
 // Edita um agendamento (unico ou recorrente): mensagens, grupos e data/hora.
 // Reescreve passos/midia/alvos e reabilita o disparo (status pending/active).
 function updateSchedule(res, id, body) {
-  const existing = db.prepare('SELECT id FROM schedules WHERE id = ?').get(id);
+  const existing = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id);
   if (!existing) return json(res, 404, { error: 'not_found' });
 
   const p = parseScheduleInput(body);
@@ -1294,6 +1303,7 @@ function updateSchedule(res, id, body) {
 
   db.exec('BEGIN;');
   try {
+    archiveRun(db, existing); // a edicao repoe os alvos e zera recur_fired_at
     db.prepare(
       `UPDATE schedules SET
          name = ?, scheduled_at = ?, payload_type = ?, content_mode = ?, default_json = ?,
@@ -1772,6 +1782,7 @@ function deleteSchedule(res, id) {
     db.prepare('DELETE FROM schedule_steps WHERE schedule_id = ?').run(id);
     db.prepare('DELETE FROM media_assets WHERE schedule_id = ?').run(id);
     db.prepare('DELETE FROM schedules WHERE id = ?').run(id);
+    db.prepare('DELETE FROM schedule_run_items WHERE schedule_id = ?').run(id);
     db.exec('COMMIT;');
   } catch (e) {
     db.exec('ROLLBACK;');
@@ -1807,9 +1818,10 @@ function rescheduleSchedule(res, id, body) {
     // Paridade ausente no corpo = "toda semana". O reagendamento reescreve a
     // recorrencia inteira, entao a paridade antiga nao sobrevive calada.
     const wk = parityToCols(body?.recur_week_parity);
+    archiveRun(db, s); // os alvos sao repostos logo abaixo
     db.prepare(
       `UPDATE schedules SET recur_dow = ?, recur_time = ?, recur_week_mod = ?, recur_week_rem = ?,
-              status = 'active', last_run_at = NULL WHERE id = ?`
+              status = 'active', last_run_at = NULL, recur_fired_at = NULL WHERE id = ?`
     ).run(body.recur_dow, body.recur_time, wk.recur_week_mod, wk.recur_week_rem, id);
   }
   // Reabilita todos os alvos, inclusive os pulados: a cobertura/admin e
