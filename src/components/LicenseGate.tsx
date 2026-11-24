@@ -47,6 +47,10 @@ const COPY: Record<string, { title: string; body: string }> = {
     title: "Painel indisponível",
     body: "O servidor de licenças respondeu de forma inesperada. Tente de novo em instantes; se persistir, fale com o suporte.",
   },
+  startup_error: {
+    title: "Falha ao iniciar",
+    body: "O aplicativo não conseguiu iniciar o serviço interno. Feche e abra de novo; se persistir, verifique se o antivírus bloqueou a isigroup e envie o detalhe abaixo ao suporte.",
+  },
   clock_error: {
     title: "Relógio do computador incorreto",
     body: "A data/hora do seu sistema está fora do esperado, o que impede a validação. Ajuste o relógio do Windows (data, hora e fuso) e abra o app novamente.",
@@ -104,6 +108,14 @@ export function LicenseGate({ license, onChange }: Props) {
         {license.status === "rate_limited" && license.retry_after_s ? (
           <p className="muted">Tente de novo em ~{license.retry_after_s}s.</p>
         ) : null}
+
+        {/* Detalhe técnico (DNS/TLS/proxy/sidecar) para o cliente repassar ao suporte. */}
+        {license.message &&
+          ["network_error", "server_error", "startup_error"].includes(license.status) && (
+            <p className="muted" style={{ fontSize: 12, userSelect: "text", wordBreak: "break-word" }}>
+              Detalhe: {license.message}
+            </p>
+          )}
 
         {showForm && (
           <form onSubmit={activate} className="gate-form">

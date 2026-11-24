@@ -1,8 +1,6 @@
 ## Correções
 
-### Agendamento no plano Free não dá mais "HTTP 403"
-No plano Free, o campo de mídia aceitava vários arquivos na mesma mensagem (rodízio de mídias, recurso do plano Pro), e o agendamento era recusado ao salvar. Agora o plano Free aceita uma mídia por mensagem: escolher outra substitui a atual.
+### "Sem conexão" ao abrir o app mesmo com internet
+Quando o serviço interno do isiGroup não conseguia iniciar (por exemplo, bloqueado pelo antivírus), o app mostrava "Sem conexão", mesmo com a internet funcionando. Agora ele mostra **"Falha ao iniciar"**, com a orientação certa.
 
-Agendamentos criados no plano Pro com várias mídias ou várias opções de mensagem também podem ser salvos no plano Free: o app avisa e mantém a 1ª opção e a 1ª mídia de cada mensagem.
-
-Quando um agendamento for recusado, a mensagem de erro agora explica o motivo.
+Nas telas de erro de conexão e de inicialização, o app também mostra um **detalhe técnico** do problema, que você pode copiar e enviar ao suporte.

@@ -129,7 +129,9 @@ pub fn run() {
                     if let Some(state) = handle.try_state::<AppState>() {
                         if let Ok(mut lic) = state.license.lock() {
                             *lic = LicenseState {
-                                status: "network_error".into(),
+                                // Falha local (sidecar/HWID/pastas), nao de rede: antes
+                                // aparecia como "Sem conexao" mesmo com internet.
+                                status: "startup_error".into(),
                                 message: Some(e),
                                 ..Default::default()
                             };
