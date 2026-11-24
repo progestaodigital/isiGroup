@@ -3,7 +3,7 @@
 // (node_modules plano via npm) para src-tauri/resources, que o Tauri embute no
 // instalador. Assim o app instalado roda o sidecar sem Node na máquina do usuário.
 
-import { cpSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { cpSync, rmSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -52,5 +52,14 @@ execSync('npm install --omit=dev --no-audit --no-fund --loglevel=error', {
   cwd: sidecarDst,
   stdio: 'inherit',
 });
+
+// 4) Remove pastas de teste das dependências: não rodam no app e trazem fixtures
+// (.docx/.zip do mammoth) que o antivírus trava durante a instalação
+// ("Error opening file for writing" no setup).
+const testDirs = new Set(['test', 'tests', '__tests__']);
+const nm = join(sidecarDst, 'node_modules');
+for (const e of readdirSync(nm, { recursive: true, withFileTypes: true })) {
+  if (e.isDirectory() && testDirs.has(e.name)) rmSync(join(e.parentPath, e.name), { recursive: true, force: true });
+}
 
 console.log('[bundle] sidecar empacotado em', sidecarDst);
